@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offline Knowledge Base</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app" id="app">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-title">对话</div>
+                <div class="sidebar-header-actions">
+                    <button id="new-chat-btn" type="button" title="新建对话">+</button>
+                    <button id="settings-btn" type="button" title="设置">⚙️</button>
+                </div>
+            </div>
+            <div class="conversation-list" id="conversation-list"></div>
+        </aside>
+        <div class="main">
+            <header class="topbar">
+                <button class="sidebar-toggle" id="sidebar-toggle" type="button">对话</button>
+                <div class="topbar-title" id="current-conversation-title">离线本地知识库</div>
+            </header>
+            <main id="chat-container"></main>
+            <footer>
+                <input type="text" id="message-input" placeholder="请输入您的问题..." autofocus>
+                <button id="send-btn">发送</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- 设置模态框 -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>系统设置</h3>
+                <button class="close-btn" id="close-settings">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="setting-item">
+                    <label>知识库本地目录：</label>
+                    <div class="input-group">
+                        <input type="text" id="kb-folder-input" placeholder="例如: /Users/sleep/Documents/kb">
+                        <button id="select-kb-folder" class="secondary-btn">选择</button>
+                        <button id="save-kb-folder" class="primary-btn">保存</button>
+                    </div>
+                    <p class="helper-text">请指定包含 .txt, .md, .pdf, .docx, .xlsx 等文件的文件夹路径。</p>
+                </div>
+                <div class="setting-item">
+                    <label>知识库同步：</label>
+                    <div class="action-group">
+                        <button id="sync-kb-btn" class="secondary-btn">开始同步</button>
+                        <span id="sync-status"></span>
+                    </div>
+                </div>
+                <div class="setting-item">
+                    <label>文件列表：</label>
+                    <div id="kb-file-list" class="file-list">
+                        <!-- 文件列表将通过 JS 动态加载 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

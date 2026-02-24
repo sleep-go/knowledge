@@ -1,0 +1,4 @@
+- [x] `start.sh` 存在且可执行
+- [x] `start.bat` 存在
+- [x] `README.md` 包含启动说明
+- [x] 运行 `./start.sh` 可以成功启动服务 (需人工验证)

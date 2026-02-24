@@ -1,0 +1,210 @@
+package kb
+
+import (
+	"bytes"
+	"crypto/md5"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+
+	"knowledge/internal/db"
+
+	"github.com/ledongthuc/pdf"
+	"github.com/lu4p/cat"
+	"github.com/xuri/excelize/v2"
+)
+
+type KnowledgeBase struct {
+	mu sync.Mutex
+}
+
+func NewKnowledgeBase() *KnowledgeBase {
+	return &KnowledgeBase{}
+}
+
+// ScanFolder 扫描文件夹并同步到数据库
+func (kb *KnowledgeBase) ScanFolder() error {
+	folder, err := db.GetKBFolder()
+	if err != nil || folder == "" {
+		return fmt.Errorf("knowledge base folder not set")
+	}
+
+	return filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		// 只处理文本相关文件
+		ext := strings.ToLower(filepath.Ext(path))
+		if !isSupportedExt(ext) {
+			return nil
+		}
+
+		checksum, err := calculateMD5(path)
+		if err != nil {
+			return err
+		}
+
+		// 存入数据库
+		_, err = db.SaveKBFile(path, info.Size(), checksum)
+		return err
+	})
+}
+
+// ProcessFiles 处理待处理的文件
+func (kb *KnowledgeBase) ProcessFiles() error {
+	files, err := db.ListKBFiles()
+	if err != nil {
+		return err
+	}
+
+	for _, f := range files {
+		if f.Status != "pending" {
+			continue
+		}
+
+		if err := kb.processFile(f); err != nil {
+			fmt.Printf("Error processing file %s: %v\n", f.Path, err)
+			_ = db.UpdateKBFileStatus(f.ID, "error")
+			continue
+		}
+
+		_ = db.UpdateKBFileStatus(f.ID, "processed")
+	}
+	return nil
+}
+
+func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
+	ext := strings.ToLower(filepath.Ext(f.Path))
+	var content string
+	var err error
+
+	switch ext {
+	case ".pdf":
+		content, err = extractTextFromPDF(f.Path)
+	case ".docx":
+		content, err = extractTextFromDocx(f.Path)
+	case ".xlsx":
+		content, err = extractTextFromXlsx(f.Path)
+	default:
+		// 默认处理文本文件
+		var b []byte
+		b, err = os.ReadFile(f.Path)
+		if err == nil {
+			content = string(b)
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// 先删除旧切片
+	if err := db.DeleteKBChunks(f.ID); err != nil {
+		return err
+	}
+
+	// 简单切片：按行或者按固定长度
+	chunks := splitText(content, 500) // 每 500 字一个切片
+	for _, chunk := range chunks {
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		if err := db.SaveKBChunk(f.ID, chunk); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func extractTextFromPDF(path string) (string, error) {
+	f, r, err := pdf.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	b, err := r.GetPlainText()
+	if err != nil {
+		return "", err
+	}
+	_, err = buf.ReadFrom(b)
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func extractTextFromDocx(path string) (string, error) {
+	return cat.File(path)
+}
+
+func extractTextFromXlsx(path string) (string, error) {
+	f, err := excelize.OpenFile(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			fmt.Printf("关闭 Excel 文件出错: %v\n", err)
+		}
+	}()
+
+	var fullText strings.Builder
+	sheets := f.GetSheetList()
+	for _, sheet := range sheets {
+		rows, err := f.GetRows(sheet)
+		if err != nil {
+			continue
+		}
+		for _, row := range rows {
+			for _, colCell := range row {
+				fullText.WriteString(colCell)
+				fullText.WriteString("\t")
+			}
+			fullText.WriteString("\n")
+		}
+	}
+	return fullText.String(), nil
+}
+
+func isSupportedExt(ext string) bool {
+	supported := []string{
+		".txt", ".md", ".pdf", ".docx", ".xlsx",
+	}
+	return slices.Contains(supported, ext)
+}
+
+func calculateMD5(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func splitText(text string, chunkSize int) []string {
+	var chunks []string
+	runes := []rune(text)
+	for i := 0; i < len(runes); i += chunkSize {
+		end := min(i+chunkSize, len(runes))
+		chunks = append(chunks, string(runes[i:end]))
+	}
+	return chunks
+}
