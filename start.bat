@@ -1,13 +1,29 @@
 @echo off
-chcp 65001 >nul
+setlocal
 
-REM 检查是否安装了 go
-where go >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
-    echo 错误: 未安装 go。
+:: 设置 CGO_ENABLED=1 以启用 CGO 支持
+set CGO_ENABLED=1
+
+:: 检查是否安装了 GCC (MinGW-w64)
+where gcc >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [ERROR] GCC not found. Please install MinGW-w64 to enable CGO.
+    echo You can download it from: https://github.com/skeeto/w64devkit/releases
+    echo.
+    echo If you want to run without LLM features (stub mode), set CGO_ENABLED=0 in this script.
+    pause
     exit /b 1
 )
 
-REM 运行服务器
-REM 允许通过参数传递模型路径，例如: start.bat -model models/my-model.gguf
-go run -tags cgo_llama ./cmd/server %*
+echo [INFO] CGO is enabled. Building and starting...
+
+:: 运行项目
+go run ./cmd/server
+
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to run the application.
+    pause
+    exit /b %errorlevel%
+)
+
+endlocal
