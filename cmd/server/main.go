@@ -19,90 +19,88 @@ import (
 )
 
 func main() {
-	// Determine executable directory for relative paths
+	// 获取可执行文件路径，用于处理相对路径
 	exePath, err := os.Executable()
 	if err != nil {
-		log.Fatal("Failed to get executable path:", err)
+		log.Fatal("获取可执行文件路径失败:", err)
 	}
 	exeDir := filepath.Dir(exePath)
 
-	// Helper to resolve paths relative to executable if they are not absolute
-	// In macOS .app bundle, resources are usually in ../Resources relative to the binary in Contents/MacOS
-	// But standard structure is:
+	// 路径解析函数：如果路径不是绝对路径，则尝试在不同位置查找
+	// 在 macOS .app 包中，资源通常位于 ../Resources 目录
+	// 标准结构：
 	// App.app/Contents/MacOS/binary
 	// App.app/Contents/Resources/models
-	// So we might need to check parent directory too.
 	resolvePath := func(p string) string {
 		if filepath.IsAbs(p) {
 			return p
 		}
 
-		// 1. Check relative to CWD (development mode)
+		// 1. 检查相对于当前工作目录的路径（开发模式）
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 
-		// 2. Check relative to executable directory (standard binary deployment)
+		// 2. 检查相对于可执行文件目录的路径（标准二进制部署）
 		pathExe := filepath.Join(exeDir, p)
 		if _, err := os.Stat(pathExe); err == nil {
 			return pathExe
 		}
 
-		// 3. Check relative to ../Resources (macOS App Bundle)
-		// exeDir is Contents/MacOS, so ../Resources is Contents/Resources
+		// 3. 检查相对于 ../Resources 的路径（macOS App Bundle）
+		// exeDir 是 Contents/MacOS，所以 ../Resources 是 Contents/Resources
 		pathResources := filepath.Join(exeDir, "..", "Resources", p)
 		if _, err := os.Stat(pathResources); err == nil {
 			return pathResources
 		}
 
-		// Default to relative path if not found anywhere (let it fail naturally later or create new)
+		// 如果在所有位置都找不到，返回原始路径（稍后自然失败或创建新文件）
 		return p
 	}
 
-	// Default paths (relative)
+	// 默认路径（相对路径）
 	defaultModelPath := "models/LiquidAI_LFM2.5-1.2B-Instruct-GGUF_LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
 	defaultDbPath := "data/knowledge.db"
 
-	port := flag.String("port", "8081", "Server port")
-	modelPath := flag.String("model", defaultModelPath, "Path to GGUF model")
-	dbPath := flag.String("db", defaultDbPath, "Path to SQLite database")
+	// 命令行参数
+	port := flag.String("port", "8081", "服务器端口")
+	modelPath := flag.String("model", defaultModelPath, "GGUF 模型路径")
+	dbPath := flag.String("db", defaultDbPath, "SQLite 数据库路径")
 	flag.Parse()
 
-	// Resolve paths
+	// 解析路径
 	finalModelPath := resolvePath(*modelPath)
 	finalDbPath := resolvePath(*dbPath)
 
-	fmt.Printf("Executable: %s\n", exePath)
-	fmt.Printf("Resolved Model Path: %s\n", finalModelPath)
-	fmt.Printf("Resolved DB Path: %s\n", finalDbPath)
+	fmt.Printf("可执行文件: %s\n", exePath)
+	fmt.Printf("解析后的模型路径: %s\n", finalModelPath)
+	fmt.Printf("解析后的数据库路径: %s\n", finalDbPath)
 
-	// Ensure data directory exists for DB if we are creating it
+	// 确保数据库文件所在目录存在
 	if _, err := os.Stat(finalDbPath); os.IsNotExist(err) {
-		// If resolved path is still the relative one (not found), make it relative to exeDir or Resources?
-		// If it's "data/knowledge.db" and not found, resolvePath returned "data/knowledge.db".
-		// We should probably default to creating it next to binary or in Resources if packaged.
-
-		// Let's refine logic: if resolvePath returned relative path, it means it wasn't found.
-		// We should construct an absolute path for creation.
+		// 如果解析后的路径仍然是相对路径（未找到），使用当前工作目录
+		// 这样可以确保即使在使用 go run 时，数据库文件也能在正确位置创建
 		if !filepath.IsAbs(finalDbPath) {
-			// Check if we are in a bundle
-			resourcesDir := filepath.Join(exeDir, "..", "Resources")
-			if _, err := os.Stat(resourcesDir); err == nil {
-				// We are likely in a bundle, try to use Resources (though writing there is discouraged, user asked for it)
-				finalDbPath = filepath.Join(resourcesDir, *dbPath)
-			} else {
-				// Standard binary
-				finalDbPath = filepath.Join(exeDir, *dbPath)
-			}
-			fmt.Printf("DB not found, defaulting to create at: %s\n", finalDbPath)
+			// 开发模式下使用当前工作目录
+			finalDbPath = filepath.Join("data", "knowledge.db")
+			fmt.Printf("数据库未找到，默认创建位置: %s\n", finalDbPath)
 		}
 	}
 
-	// Find the model file
-	if _, err := os.Stat(finalModelPath); os.IsNotExist(err) {
-		// If default or specified path doesn't exist, try to find any .gguf in models/ relative to likely locations
+	// 确保数据库目录存在
+	dbDir := filepath.Dir(finalDbPath)
+	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			log.Fatal("创建数据库目录失败:", err)
+		}
+		fmt.Printf("创建数据库目录: %s\n", dbDir)
+	}
 
-		// Search locations
+	// 查找模型文件
+	if _, err := os.Stat(finalModelPath); os.IsNotExist(err) {
+		// 如果默认或指定路径不存在，尝试在可能的位置查找 .gguf 文件
+
+		// 搜索位置
 		searchDirs := []string{
 			"models",
 			filepath.Join(exeDir, "models"),
@@ -116,59 +114,58 @@ func main() {
 			files, _ := filepath.Glob(pattern)
 			if len(files) > 0 {
 				finalModelPath = files[0]
-				fmt.Printf("Auto-detected model: %s\n", finalModelPath)
+				fmt.Printf("自动检测到模型: %s\n", finalModelPath)
 				found = true
 				break
 			}
 		}
 
 		if !found {
-			fmt.Printf("Warning: Model not found at %s and no .gguf files found in search paths.\n", finalModelPath)
+			fmt.Printf("警告: 在 %s 未找到模型，且在搜索路径中未找到 .gguf 文件。\n", finalModelPath)
 		}
 	}
 
-	// Initialize Database
+	// 初始化数据库
 	db.InitDB(finalDbPath)
 
 	// 禁用Metal后端，使用CPU后端
 	os.Setenv("GGML_METAL", "0")
 	os.Setenv("GGML_METAL_PATH", "")
 
-	// Initialize LLM Engine (Use Native CGO Engine)
+	// 初始化LLM引擎（使用原生CGO引擎）
 	var engine llm.Engine = llm.NewEngine()
 
-	// Initialize Knowledge Base
+	// 初始化知识库
 	kbase := kb.NewKnowledgeBase()
 
-	// Try to initialize. If it fails (e.g. model path wrong, or binding error),
-	// we should log it clearly.
+	// 尝试初始化引擎。如果失败（例如模型路径错误或绑定错误），清晰记录日志
 	if err := engine.Init(finalModelPath); err != nil {
-		log.Printf("Error initializing LlamaEngine with model '%s': %v", finalModelPath, err)
-		// If failed, we just exit or panic because we removed Mock fallback
-		log.Fatal("Failed to initialize LLM engine")
+		log.Printf("初始化LlamaEngine失败，模型 '%s': %v", finalModelPath, err)
+		// 如果失败，直接退出，因为我们移除了Mock fallback
+		log.Fatal("初始化LLM引擎失败")
 	} else {
-		log.Printf("Successfully initialized LlamaEngine with model: %s", finalModelPath)
+		log.Printf("成功初始化LlamaEngine，模型: %s", finalModelPath)
 	}
 
 	// 将初始化后的引擎赋值给全局变量，供知识库使用
 	llm.CurrentEngine = engine
 
-	// Ensure cleanup on exit
+	// 确保程序退出时清理资源
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		fmt.Println("\nShutting down...")
+		fmt.Println("\n正在关闭...")
 		if closer, ok := engine.(interface{ Close() }); ok {
 			closer.Close()
 		}
 		os.Exit(0)
 	}()
 
-	// Setup Router
+	// 设置路由
 	r := server.SetupRouter(web.StaticFiles, engine, kbase)
 
-	// Open Browser automatically
+	// 自动打开浏览器
 	go func() {
 		// 立即打开浏览器，不等待服务器启动
 		// 这样可以避免因为服务器启动缓慢而导致浏览器无法打开
@@ -176,13 +173,14 @@ func main() {
 		openBrowser(url)
 	}()
 
-	// Start Server
-	fmt.Printf("Starting web server on port %s...\n", *port)
+	// 启动服务器
+	fmt.Printf("正在端口 %s 启动网络服务器...\n", *port)
 	if err := r.Run(":" + *port); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// openBrowser 打开浏览器函数
 func openBrowser(url string) {
 	var err error
 	switch runtime.GOOS {
@@ -193,9 +191,9 @@ func openBrowser(url string) {
 	case "darwin":
 		err = exec.Command("open", url).Start()
 	default:
-		err = fmt.Errorf("unsupported platform")
+		err = fmt.Errorf("不支持的平台")
 	}
 	if err != nil {
-		log.Printf("Failed to open browser: %v", err)
+		log.Printf("打开浏览器失败: %v", err)
 	}
 }
