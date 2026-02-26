@@ -61,6 +61,26 @@ go run ./cmd/server -port 8080 -model models/your-model.gguf
 - **历史记录**: 自动保存对话历史。
 - **多模型支持**: 支持任何兼容 llama.cpp 的 GGUF 模型。
 
+## 打包应用
+
+### macOS 应用打包
+我们提供了 `build_app.sh` 脚本用于在 macOS 上创建可分发的应用程序包：
+
+```bash
+# 确保脚本有执行权限
+chmod +x scripts/build_app.sh
+
+# 运行打包脚本
+./scripts/build_app.sh
+```
+
+打包完成后，会在 `bin/` 目录下生成 `Knowledge.app` 应用程序包。
+
+### 打包注意事项
+- 打包前确保已编译好 Go 二进制文件
+- 打包过程会自动复制 `models/` 目录下的模型文件
+- 生成的应用程序包可以直接双击运行
+
 ## 故障排除
 - **服务无法启动**: 检查 `bin/llama-server` 是否存在且有执行权限。
 - **模型加载失败**: 确保下载的是 `.gguf` 格式，且文件未损坏。
