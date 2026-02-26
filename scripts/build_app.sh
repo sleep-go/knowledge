@@ -60,7 +60,27 @@ EOF
 echo "Copying binary..."
 cp "$OUTPUT_DIR/$BINARY_NAME" "$APP_DIR/Contents/MacOS/$BINARY_NAME"
 
-# 5. Make the binary executable
+# 5. Copy resources (models and data)
+echo "Copying resources..."
+mkdir -p "$APP_DIR/Contents/Resources/models"
+mkdir -p "$APP_DIR/Contents/Resources/data"
+
+if [ -d "models" ]; then
+    cp -r models/* "$APP_DIR/Contents/Resources/models/"
+    echo "Copied models"
+else
+    echo "Warning: models directory not found"
+fi
+
+if [ -d "data" ]; then
+    cp -r data/* "$APP_DIR/Contents/Resources/data/"
+    echo "Copied data"
+else
+    # Create empty db if data dir doesn't exist
+    touch "$APP_DIR/Contents/Resources/data/.keep"
+fi
+
+# 6. Make the binary executable
 echo "Setting permissions..."
 chmod +x "$APP_DIR/Contents/MacOS/$BINARY_NAME"
 

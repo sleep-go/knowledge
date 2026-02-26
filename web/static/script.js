@@ -1014,12 +1014,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const ext = getFileExtension(fileName);
         const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
-        const codeExts = ['txt', 'md', 'go', 'js', 'css', 'html', 'json', 'py', 'c', 'cpp', 'h', 'hpp', 'sh', 'bash', 'zsh', 'yaml', 'yml', 'xml', 'sql', 'java', 'rs', 'ts', 'tsx', 'jsx'];
 
-        // 如果是图片，直接显示
+        // 1. 如果是图片，直接显示
         if (imageExts.includes(ext)) {
             const img = new Image();
             img.src = `/api/kb/download?file=${encodeURIComponent(fileName)}`;
+            img.style.maxWidth = '100%';
+            img.style.display = 'block';
+            img.style.margin = '0 auto';
             img.onload = () => {
                 previewBody.innerHTML = '';
                 previewBody.appendChild(img);
@@ -1030,34 +1032,44 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // 如果是文本或代码，先获取内容
-        if (codeExts.includes(ext)) {
-            try {
-                const res = await fetch(`/api/kb/download?file=${encodeURIComponent(fileName)}`);
-                if (!res.ok) throw new Error('Failed to load file content');
-                const text = await res.text();
-                
+        // 2. 如果是 PDF，使用 iframe 预览
+        if (ext === 'pdf') {
+            previewBody.innerHTML = `<iframe src="/api/kb/download?file=${encodeURIComponent(fileName)}" style="width:100%; height:100%; min-height:500px; border:none;"></iframe>`;
+            return;
+        }
+
+        // 3. 其他类型（Office、文本、代码），尝试获取解析后的文本内容
+        try {
+            const res = await fetch(`/api/kb/content?file=${encodeURIComponent(fileName)}`);
+            if (!res.ok) throw new Error('Failed to load file content');
+            const data = await res.json();
+            
+            if (data.content) {
                 if (ext === 'md') {
                     // Markdown 渲染
-                    previewBody.innerHTML = renderMarkdown(text);
+                    previewBody.innerHTML = renderMarkdown(data.content);
                 } else {
-                    // 代码高亮
+                    // 代码或纯文本显示
                     const pre = document.createElement('pre');
                     const code = document.createElement('code');
+                    // 尝试匹配语言 class
                     code.className = `language-${ext}`;
-                    code.textContent = text;
+                    code.textContent = data.content;
                     pre.appendChild(code);
                     previewBody.innerHTML = '';
                     previewBody.appendChild(pre);
                 }
-            } catch (err) {
-                console.error(err);
-                previewBody.innerHTML = `<div class="preview-error">无法加载文件内容: ${err.message}</div>`;
+            } else {
+                 throw new Error('No content available');
             }
-            return;
+        } catch (err) {
+            console.error(err);
+            previewBody.innerHTML = `
+                <div class="preview-error" style="text-align: center; padding: 20px;">
+                    <p style="margin-bottom: 15px;">无法直接预览此文件内容。</p>
+                    <a href="/api/kb/download?file=${encodeURIComponent(fileName)}" target="_blank" style="display: inline-block; padding: 8px 16px; background: #3b82f6; color: white; text-decoration: none; border-radius: 4px;">下载查看</a>
+                </div>`;
         }
-
-        previewBody.innerHTML = '<div class="preview-error">不支持预览此类型的文件，请下载查看。</div>';
     }
 
     closePreviewBtn.addEventListener('click', () => {

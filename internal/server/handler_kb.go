@@ -65,6 +65,44 @@ func (s *Server) DownloadKBFile(c *gin.Context) {
 	c.File(filePath)
 }
 
+// GetKBFileContent 获取文件经过解析后的文本内容（用于预览）
+func (s *Server) GetKBFileContent(c *gin.Context) {
+	fileName := c.Query("file")
+	if fileName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File parameter is required"})
+		return
+	}
+
+	folder, err := db.GetKBFolder()
+	if err != nil || folder == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Knowledge base folder not set"})
+		return
+	}
+
+	// 简单防止路径遍历，只允许访问 KB 根目录下的文件
+	// 如果支持子目录，需要更复杂的逻辑，但目前 KB 主要是扁平的或由 ScanFolder 决定
+	// 这里假设前端传来的只是文件名或相对路径
+	// 安全起见，我们先只取 Base
+	cleanFileName := filepath.Base(fileName)
+	filePath := filepath.Join(folder, cleanFileName)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	content, err := s.kbase.GetFileContent(filePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file content: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"content": content,
+	})
+}
+
 func (s *Server) SelectKBFolder(c *gin.Context) {
 	// 仅在 macOS 上工作
 	// 直接获取 POSIX 路径

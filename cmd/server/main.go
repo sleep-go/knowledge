@@ -20,27 +20,115 @@ import (
 )
 
 func main() {
-	port := flag.String("port", "8081", "Server port") // Use 8081 for web, as 8080 is for llama-server
-	modelPath := flag.String("model", "models/llama-2-7b-chat.gguf", "Path to GGUF model")
-	dbPath := flag.String("db", "data/knowledge.db", "Path to SQLite database")
-	// useMock := flag.Bool("mock", false, "Force use of Mock engine") // Removed
+	// Determine executable directory for relative paths
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Fatal("Failed to get executable path:", err)
+	}
+	exeDir := filepath.Dir(exePath)
+	
+	// Helper to resolve paths relative to executable if they are not absolute
+	// In macOS .app bundle, resources are usually in ../Resources relative to the binary in Contents/MacOS
+	// But standard structure is:
+	// App.app/Contents/MacOS/binary
+	// App.app/Contents/Resources/models
+	// So we might need to check parent directory too.
+	resolvePath := func(p string) string {
+		if filepath.IsAbs(p) {
+			return p
+		}
+		
+		// 1. Check relative to CWD (development mode)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+
+		// 2. Check relative to executable directory (standard binary deployment)
+		pathExe := filepath.Join(exeDir, p)
+		if _, err := os.Stat(pathExe); err == nil {
+			return pathExe
+		}
+
+		// 3. Check relative to ../Resources (macOS App Bundle)
+		// exeDir is Contents/MacOS, so ../Resources is Contents/Resources
+		pathResources := filepath.Join(exeDir, "..", "Resources", p)
+		if _, err := os.Stat(pathResources); err == nil {
+			return pathResources
+		}
+
+		// Default to relative path if not found anywhere (let it fail naturally later or create new)
+		return p
+	}
+
+	// Default paths (relative)
+	defaultModelPath := "models/LiquidAI_LFM2.5-1.2B-Instruct-GGUF_LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+	defaultDbPath := "data/knowledge.db"
+
+	port := flag.String("port", "8081", "Server port")
+	modelPath := flag.String("model", defaultModelPath, "Path to GGUF model")
+	dbPath := flag.String("db", defaultDbPath, "Path to SQLite database")
 	flag.Parse()
 
+	// Resolve paths
+	finalModelPath := resolvePath(*modelPath)
+	finalDbPath := resolvePath(*dbPath)
+
+	fmt.Printf("Executable: %s\n", exePath)
+	fmt.Printf("Resolved Model Path: %s\n", finalModelPath)
+	fmt.Printf("Resolved DB Path: %s\n", finalDbPath)
+
+	// Ensure data directory exists for DB if we are creating it
+	if _, err := os.Stat(finalDbPath); os.IsNotExist(err) {
+		// If resolved path is still the relative one (not found), make it relative to exeDir or Resources?
+		// If it's "data/knowledge.db" and not found, resolvePath returned "data/knowledge.db".
+		// We should probably default to creating it next to binary or in Resources if packaged.
+		
+		// Let's refine logic: if resolvePath returned relative path, it means it wasn't found.
+		// We should construct an absolute path for creation.
+		if !filepath.IsAbs(finalDbPath) {
+			// Check if we are in a bundle
+			resourcesDir := filepath.Join(exeDir, "..", "Resources")
+			if _, err := os.Stat(resourcesDir); err == nil {
+				// We are likely in a bundle, try to use Resources (though writing there is discouraged, user asked for it)
+				finalDbPath = filepath.Join(resourcesDir, *dbPath)
+			} else {
+				// Standard binary
+				finalDbPath = filepath.Join(exeDir, *dbPath)
+			}
+			fmt.Printf("DB not found, defaulting to create at: %s\n", finalDbPath)
+		}
+	}
+
 	// Find the model file
-	finalModelPath := *modelPath
 	if _, err := os.Stat(finalModelPath); os.IsNotExist(err) {
-		// If default or specified path doesn't exist, try to find any .gguf in models/
-		files, _ := filepath.Glob("models/*.gguf")
-		if len(files) > 0 {
-			finalModelPath = files[0]
-			fmt.Printf("Auto-detected model: %s\n", finalModelPath)
-		} else {
-			fmt.Printf("Warning: Model not found at %s and no .gguf files in models/ directory.\n", finalModelPath)
+		// If default or specified path doesn't exist, try to find any .gguf in models/ relative to likely locations
+		
+		// Search locations
+		searchDirs := []string{
+			"models",
+			filepath.Join(exeDir, "models"),
+			filepath.Join(exeDir, "..", "Resources", "models"),
+		}
+		
+		found := false
+		for _, dir := range searchDirs {
+			pattern := filepath.Join(dir, "*.gguf")
+			files, _ := filepath.Glob(pattern)
+			if len(files) > 0 {
+				finalModelPath = files[0]
+				fmt.Printf("Auto-detected model: %s\n", finalModelPath)
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			fmt.Printf("Warning: Model not found at %s and no .gguf files found in search paths.\n", finalModelPath)
 		}
 	}
 
 	// Initialize Database
-	db.InitDB(*dbPath)
+	db.InitDB(finalDbPath)
 
 	// Initialize LLM Engine (Use Native CGO Engine)
 	var engine llm.Engine = llm.NewEngine()
