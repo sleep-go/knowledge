@@ -3,8 +3,10 @@ package kb
 import (
 	"bytes"
 	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +14,7 @@ import (
 	"sync"
 
 	"knowledge/internal/db"
+	"knowledge/internal/llm"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/lu4p/cat"
@@ -137,6 +140,61 @@ func (kb *KnowledgeBase) GetFileContent(path string) (string, error) {
 	}
 }
 
+// Float32SliceToBytes 将float32切片转换为字节数组
+func Float32SliceToBytes(s []float32) []byte {
+	b := make([]byte, len(s)*4)
+	for i, v := range s {
+		binary.LittleEndian.PutUint32(b[i*4:], uint32(math.Float32bits(v)))
+	}
+	return b
+}
+
+// BytesToFloat32Slice 将字节数组转换为float32切片
+func BytesToFloat32Slice(b []byte) []float32 {
+	s := make([]float32, len(b)/4)
+	for i := range s {
+		s[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return s
+}
+
+// CosineSimilarity 计算两个向量的余弦相似度
+func CosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return 0
+	}
+
+	var dotProduct float32
+	var normA float32
+	var normB float32
+
+	for i := range a {
+		dotProduct += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+
+	return dotProduct / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
+}
+
+// getEmbedding 获取文本的向量表示
+func getEmbedding(text string) ([]byte, error) {
+	if llm.CurrentEngine == nil {
+		return nil, fmt.Errorf("LLM engine not initialized")
+	}
+
+	embedding, err := llm.CurrentEngine.GetEmbedding(text)
+	if err != nil {
+		return nil, err
+	}
+
+	return Float32SliceToBytes(embedding), nil
+}
+
 func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	ext := strings.ToLower(filepath.Ext(f.Path))
 	var content string
@@ -173,7 +231,16 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
-		if err := db.SaveKBChunk(f.ID, chunk); err != nil {
+
+		// 生成向量
+		vector, err := getEmbedding(chunk)
+		if err != nil {
+			// 如果生成向量失败，继续处理，不返回错误
+			fmt.Printf("Error getting embedding: %v\n", err)
+			vector = nil
+		}
+
+		if err := db.SaveKBChunk(f.ID, chunk, vector); err != nil {
 			return err
 		}
 	}

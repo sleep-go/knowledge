@@ -802,6 +802,15 @@ footer {
     font-size: 14px;
     color: #475569;
     background-color: #fff;
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+    max-height: 2000px;
+    overflow: hidden;
+}
+
+.think-block.collapsed .think-content {
+    max-height: 0;
+    padding: 0 12px;
+    border-top: none;
 }
 
 /* Document Block Styles */

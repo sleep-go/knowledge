@@ -116,14 +116,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     isClosed = true;
                 }
                 
-                // 默认添加 collapsed 类
+                // 默认展开，不添加 collapsed 类
                 // 如果未闭合，在内容末尾添加 loading 动画
                 let innerHtml = renderMarkdown(content);
                 if (!isClosed) {
                     innerHtml += '<div class="loading-dots"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>';
                 }
                 
-                html += `<div class="think-block collapsed"><div class="think-title">思考过程</div><div class="think-content">${innerHtml}</div></div>`;
+                html += `<div class="think-block"><div class="think-title">思考过程</div><div class="think-content">${innerHtml}</div></div>`;
                 continue;
             }
             

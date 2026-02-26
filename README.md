@@ -16,7 +16,7 @@
 ```bash
 git clone --recurse-submodules git@github.com:sleep-go/knowledge.git
 cd llama.cpp
-cmake -B build -DBUILD_SHARED_LIBS=OFF
+cmake -B build -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=OFF
 cmake --build build --config Release --target llama common
 cd ..
 ```

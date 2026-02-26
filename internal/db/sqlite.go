@@ -1,8 +1,10 @@
 package db
 
 import (
+	"encoding/binary"
 	"errors"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +50,7 @@ type KnowledgeBaseChunk struct {
 	BaseModel
 	FileID  uint
 	Content string
-	// 未来可以增加向量字段，目前先做基础全文检索或简单匹配
+	Vector  []byte // 向量表示，用于语义搜索
 }
 
 const SystemPromptKey = "system_prompt"
@@ -252,8 +254,8 @@ func SaveKBFile(path string, size int64, checksum string) (*KnowledgeBaseFile, e
 	return &f, err
 }
 
-func SaveKBChunk(fileID uint, content string) error {
-	return DB.Create(&KnowledgeBaseChunk{FileID: fileID, Content: content}).Error
+func SaveKBChunk(fileID uint, content string, vector []byte) error {
+	return DB.Create(&KnowledgeBaseChunk{FileID: fileID, Content: content, Vector: vector}).Error
 }
 
 func DeleteKBChunks(fileID uint) error {
@@ -264,10 +266,58 @@ func UpdateKBFileStatus(fileID uint, status string) error {
 	return DB.Model(&KnowledgeBaseFile{}).Where("id = ?", fileID).Update("status", status).Error
 }
 
+// ChunkWithSimilarity 带相似度的chunk
+type ChunkWithSimilarity struct {
+	KnowledgeBaseChunk
+	Similarity float32
+}
+
+// bytesToFloat32Slice 将字节数组转换为float32切片
+func bytesToFloat32Slice(b []byte) []float32 {
+	s := make([]float32, len(b)/4)
+	for i := range s {
+		s[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return s
+}
+
+// cosineSimilarity 计算两个向量的余弦相似度
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return 0
+	}
+
+	var dotProduct float32
+	var normA float32
+	var normB float32
+
+	for i := range a {
+		dotProduct += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+
+	return dotProduct / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
+}
+
+// GetAllKBChunks 获取所有知识库分片
+func GetAllKBChunks() ([]KnowledgeBaseChunk, error) {
+	var chunks []KnowledgeBaseChunk
+	err := DB.Find(&chunks).Error
+	return chunks, err
+}
+
+// SearchKBChunks 使用传统文本搜索查找知识库分片
 func SearchKBChunks(query string, limit int) ([]KnowledgeBaseChunk, error) {
 	if limit <= 0 {
 		limit = 5
 	}
+
+	// 传统的文本搜索
 	var chunks []KnowledgeBaseChunk
 
 	// 改进：简单的关键词分割搜索
@@ -353,21 +403,21 @@ func DeleteKBFile(id uint) error {
 	if err := DB.First(&f, id).Error; err != nil {
 		return err
 	}
-	
+
 	// 1. Delete Chunks
 	if err := DeleteKBChunks(id); err != nil {
 		return err
 	}
-	
+
 	// 2. Delete Record
 	if err := DB.Delete(&f).Error; err != nil {
 		return err
 	}
-	
+
 	// 3. Delete Physical File
 	// Ignore error if file doesn't exist
 	_ = os.Remove(f.Path)
-	
+
 	return nil
 }
 
@@ -375,24 +425,24 @@ func DeleteKBFiles(ids []uint) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	
+
 	// Find all files first to get paths
 	var files []KnowledgeBaseFile
 	if err := DB.Where("id IN ?", ids).Find(&files).Error; err != nil {
 		return err
 	}
-	
+
 	return DB.Transaction(func(tx *gorm.DB) error {
 		// 1. Delete Chunks
 		if err := tx.Where("file_id IN ?", ids).Delete(&KnowledgeBaseChunk{}).Error; err != nil {
 			return err
 		}
-		
+
 		// 2. Delete Records
 		if err := tx.Where("id IN ?", ids).Delete(&KnowledgeBaseFile{}).Error; err != nil {
 			return err
 		}
-		
+
 		// 3. Delete Physical Files (after DB transaction success)
 		// We do this outside transaction usually, but here if transaction fails we shouldn't delete files.
 		// However, file deletion cannot be rolled back.
@@ -401,7 +451,7 @@ func DeleteKBFiles(ids []uint) error {
 		for _, f := range files {
 			_ = os.Remove(f.Path)
 		}
-		
+
 		return nil
 	})
 }

@@ -116,3 +116,23 @@ func llama_binding_go_on_token(cbHandle C.uintptr_t, tokenPiece *C.char) C.int {
 	}
 	return 0
 }
+
+func (l *Llama) GetEmbedding(text string) ([]float32, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	var outDim C.int
+	embedding := C.llama_binding_get_embedding(l.ctx, cText, &outDim)
+	if embedding == nil {
+		return nil, fmt.Errorf("failed to get embedding")
+	}
+	defer C.llama_binding_free_embedding(embedding)
+
+	dim := int(outDim)
+	result := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		result[i] = float32(*(*C.float)(unsafe.Pointer(uintptr(unsafe.Pointer(embedding)) + uintptr(i)*unsafe.Sizeof(C.float(0)))))
+	}
+
+	return result, nil
+}

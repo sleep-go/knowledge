@@ -224,8 +224,14 @@ void * llama_binding_load_model(const char * model_path, int n_ctx, int n_thread
     params.model.path = model_path;
     params.n_ctx = n_ctx;
     params.cpuparams.n_threads = n_threads;
-    params.n_gpu_layers = n_gpu_layers;
+    params.n_gpu_layers = 0; // 强制使用CPU后端
+    // 设置为空向量，不使用任何GPU设备，只使用CPU
+    params.devices = std::vector<ggml_backend_dev_t>();
 
+    // 禁用Metal后端，使用CPU后端
+    setenv("GGML_METAL_PATH", "", 1);
+    setenv("GGML_METAL", "0", 1);
+    
     llama_backend_init();
 
     bctx->init_res = common_init_from_params(params);
@@ -314,6 +320,61 @@ int llama_binding_chat_stream(void * ctx, const char * messages_json, const char
     }
 
     return 0;
+}
+
+float* llama_binding_get_embedding(void* ctx, const char* text, int* out_dim) {
+    if (!ctx || !text) {
+        return nullptr;
+    }
+    auto* bctx = (LlamaBindingContext*) ctx;
+
+    std::string prompt = text;
+    std::vector<llama_token> tokens = common_tokenize(bctx->ctx, prompt, true, true);
+    if (tokens.empty()) {
+        return nullptr;
+    }
+
+    llama_memory_seq_rm(llama_get_memory(bctx->ctx), 0, -1, -1);
+
+    llama_batch batch = llama_batch_init((int) tokens.size(), 0, 1);
+    common_batch_clear(batch);
+    for (size_t i = 0; i < tokens.size(); i++) {
+        common_batch_add(batch, tokens[i], i, { 0 }, false);
+    }
+    batch.logits[batch.n_tokens - 1] = true;
+
+    if (llama_decode(bctx->ctx, batch) != 0) {
+        llama_batch_free(batch);
+        return nullptr;
+    }
+
+    llama_batch_free(batch);
+
+    int dim = llama_model_n_embd(bctx->model);
+    if (out_dim) {
+        *out_dim = dim;
+    }
+
+    float* embedding = (float*) malloc(dim * sizeof(float));
+    if (!embedding) {
+        return nullptr;
+    }
+
+    // Get embeddings directly from context
+    const float* data = llama_get_embeddings(bctx->ctx);
+    if (!data) {
+        free(embedding);
+        return nullptr;
+    }
+
+    memcpy(embedding, data, dim * sizeof(float));
+    return embedding;
+}
+
+void llama_binding_free_embedding(float* embedding) {
+    if (embedding) {
+        free(embedding);
+    }
 }
 
 }

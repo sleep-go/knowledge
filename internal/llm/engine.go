@@ -12,6 +12,7 @@ type Engine interface {
 	SwitchModel(modelPath string) error
 	ListModels() ([]string, error)
 	GetModelPath() string
+	GetEmbedding(text string) ([]float32, error)
 }
 
 type ChatOptions struct {

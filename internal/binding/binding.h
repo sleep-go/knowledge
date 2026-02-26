@@ -10,6 +10,8 @@ extern "C" {
 void* llama_binding_load_model(const char* model_path, int n_ctx, int n_threads, int n_gpu_layers);
 char* llama_binding_chat(void* ctx, const char* messages_json, const char* stop_tokens, int n_predict, float temp, float top_p, int top_k, float repeat_penalty);
 int llama_binding_chat_stream(void* ctx, const char* messages_json, const char* stop_tokens, int n_predict, float temp, float top_p, int top_k, float repeat_penalty, uintptr_t cb_handle);
+float* llama_binding_get_embedding(void* ctx, const char* text, int* out_dim);
+void llama_binding_free_embedding(float* embedding);
 void llama_binding_free_model(void* ctx);
 void llama_binding_free_result(char* result);
 

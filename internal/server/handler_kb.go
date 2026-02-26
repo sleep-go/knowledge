@@ -105,8 +105,9 @@ func (s *Server) GetKBFileContent(c *gin.Context) {
 
 func (s *Server) SelectKBFolder(c *gin.Context) {
 	// 仅在 macOS 上工作
-	// 直接获取 POSIX 路径
-	script := `POSIX path of (choose folder with prompt "请选择知识库文件夹" default location (path to home folder))`
+	// 直接获取 POSIX 路径，使用更简洁的输出
+	script := `set posixPath to POSIX path of (choose folder with prompt "请选择知识库文件夹" default location (path to home folder))
+return posixPath`
 	cmd := exec.Command("osascript", "-e", script)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -115,9 +116,28 @@ func (s *Server) SelectKBFolder(c *gin.Context) {
 		return
 	}
 
-	// output 已经是 POSIX 路径，只需 trim
-	pathStr := strings.TrimSpace(string(output))
-	c.JSON(http.StatusOK, gin.H{"path": pathStr})
+	// 清理输出：只保留路径，过滤掉日志信息
+	pathStr := string(output)
+	
+	// 找到最后一个换行符，然后取后面的内容
+	lines := strings.Split(pathStr, "\n")
+	var cleanPath string
+	
+	// 从后向前查找，找到第一个非空且看起来像路径的行
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" && strings.HasPrefix(line, "/") {
+			cleanPath = line
+			break
+		}
+	}
+	
+	// 如果没找到，就用原来的方式处理
+	if cleanPath == "" {
+		cleanPath = strings.TrimSpace(pathStr)
+	}
+	
+	c.JSON(http.StatusOK, gin.H{"path": cleanPath})
 }
 
 func (s *Server) ListKBFiles(c *gin.Context) {

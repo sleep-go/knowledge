@@ -240,6 +240,18 @@ func (l *LlamaEngine) GetModelPath() string {
 	return l.modelPath
 }
 
+// GetEmbedding 获取文本的向量表示
+func (l *LlamaEngine) GetEmbedding(text string) ([]float32, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.model == nil {
+		return nil, fmt.Errorf("model not initialized")
+	}
+
+	return l.model.GetEmbedding(text)
+}
+
 func NewEngine() Engine {
 	return &LlamaEngine{}
 }

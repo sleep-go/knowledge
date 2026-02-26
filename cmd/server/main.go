@@ -110,6 +110,7 @@ func main() {
 		}
 
 		found := false
+		// 直接搜索所有模型
 		for _, dir := range searchDirs {
 			pattern := filepath.Join(dir, "*.gguf")
 			files, _ := filepath.Glob(pattern)
@@ -129,6 +130,10 @@ func main() {
 	// Initialize Database
 	db.InitDB(finalDbPath)
 
+	// 禁用Metal后端，使用CPU后端
+	os.Setenv("GGML_METAL", "0")
+	os.Setenv("GGML_METAL_PATH", "")
+
 	// Initialize LLM Engine (Use Native CGO Engine)
 	var engine llm.Engine = llm.NewEngine()
 
@@ -144,6 +149,9 @@ func main() {
 	} else {
 		log.Printf("Successfully initialized LlamaEngine with model: %s", finalModelPath)
 	}
+
+	// 将初始化后的引擎赋值给全局变量，供知识库使用
+	llm.CurrentEngine = engine
 
 	// Ensure cleanup on exit
 	c := make(chan os.Signal, 1)

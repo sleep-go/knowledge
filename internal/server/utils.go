@@ -1,10 +1,13 @@
 package server
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -114,7 +117,9 @@ func heuristicTitleFromUser(s string) string {
 }
 
 func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, lastUserMsg string) []llm.ChatMessage {
-	var fileContext string
+	// 构建新的Prompt结构
+	prompt := "你是一个本地知识库助手。\n"
+	prompt += "请仅基于提供的上下文回答问题。\n\n"
 
 	// 1. 尝试直接读取附件内容
 	// 匹配前端生成的: [已上传文件: [filename](/api/kb/download?file=...)]
@@ -126,7 +131,7 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 	if len(matches) > 2 && kbase != nil {
 		// 优先使用 Label 中的文件名（通常是原始文件名）
 		filename := strings.TrimSpace(matches[1])
-		// 也可以尝试使用 URL 参数中的文件名（URL 编码过的）
+// 也可以尝试使用 URL 参数中的文件名（URL 编码过的）
 		encodedFilename := matches[2]
 		
 		fmt.Printf("[KB] Detected file in message. Label: %s, Encoded URL param: %s\n", filename, encodedFilename)
@@ -166,11 +171,7 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 				const maxFileChars = 10000
 				truncated := truncateTextKeepNewlines(content, maxFileChars)
 
-				fileContext += fmt.Sprintf("\n\n<current_file name=\"%s\">\n%s\n</current_file>\n", filename, truncated)
-				if len(content) > maxFileChars {
-					fileContext += fmt.Sprintf("\n(File content truncated, showing first %d chars)\n", maxFileChars)
-				}
-				fileContext += "请基于上述 <current_file> 标签中的文件内容进行回答。\n"
+				prompt += fmt.Sprintf("[上下文1]\n%s\n\n", truncated)
 				fmt.Printf("[KB] Direct file read: %s (path=%s, len=%d)\n", filename, fullPath, len(truncated))
 			} else {
 				fmt.Printf("[KB] Failed to read file content %s (path=%s): %v\n", filename, fullPath, err)
@@ -182,9 +183,61 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 
 	// 2. 知识库检索 (RAG)
 	// 减少分片数量以防止 Prompt 过长
-	chunks, err := db.SearchKBChunks(lastUserMsg, 5)
+	var chunks []db.KnowledgeBaseChunk
+	var err error
+	
+	// 首先尝试使用向量搜索
+	if llm.CurrentEngine != nil {
+		// 获取查询的向量表示
+		queryEmbedding, err := llm.CurrentEngine.GetEmbedding(lastUserMsg)
+		if err == nil && len(queryEmbedding) > 0 {
+			// 从数据库中获取所有chunk
+			allChunks, err := db.GetAllKBChunks()
+			if err == nil {
+				// 计算相似度
+				type ChunkWithSimilarity struct {
+					db.KnowledgeBaseChunk
+					Similarity float32
+				}
+				
+				var chunksWithSimilarity []ChunkWithSimilarity
+				for _, chunk := range allChunks {
+					if len(chunk.Vector) > 0 {
+						// 将chunk的向量转换为float32切片
+						chunkEmbedding := bytesToFloat32Slice(chunk.Vector)
+						if len(chunkEmbedding) == len(queryEmbedding) {
+							// 计算余弦相似度
+							similarity := cosineSimilarity(queryEmbedding, chunkEmbedding)
+							chunksWithSimilarity = append(chunksWithSimilarity, ChunkWithSimilarity{
+								KnowledgeBaseChunk: chunk,
+								Similarity:         similarity,
+							})
+						}
+					}
+				}
+				
+				// 按相似度排序
+				sort.Slice(chunksWithSimilarity, func(i, j int) bool {
+					return chunksWithSimilarity[i].Similarity > chunksWithSimilarity[j].Similarity
+				})
+				
+				// 取前5个结果
+				for i := 0; i < len(chunksWithSimilarity) && i < 5; i++ {
+					chunks = append(chunks, chunksWithSimilarity[i].KnowledgeBaseChunk)
+				}
+				
+				if len(chunks) > 0 {
+					fmt.Printf("[KB] Vector search found %d chunks\n", len(chunks))
+				}
+			}
+		}
+	}
+	
+	// 如果向量搜索失败或没有结果，回退到传统的文本搜索
+	if len(chunks) == 0 {
+		chunks, err = db.SearchKBChunks(lastUserMsg, 5)
+	}
 
-	ragContext := ""
 	if err == nil && len(chunks) > 0 {
 		fmt.Printf("[KB] Found %d chunks for query: %s\n", len(chunks), lastUserMsg)
 
@@ -214,31 +267,22 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 		}
 		fmt.Printf("[KB] Total context length (chars): %d\n", totalLen)
 
-		if len(validChunks) > 0 {
-			ragContext += "\n\n<knowledge_base>\n"
-			for i, chunk := range validChunks {
-				ragContext += fmt.Sprintf("<document index=\"%d\">\n%s\n</document>\n", i+1, chunk.Content)
-			}
-			ragContext += "</knowledge_base>\n\n"
-			ragContext += "请参考以上 <knowledge_base> 标签内提供的背景知识来回答用户的问题。\n"
-			ragContext += "如果在背景知识中找到了相关信息，请优先使用背景知识回答。\n"
-			ragContext += "如果背景知识中没有相关信息，请忽略它们，并结合你的通用知识回答。\n"
+		for i, chunk := range validChunks {
+			prompt += fmt.Sprintf("[上下文%d]\n%s\n\n", i+1, chunk.Content)
 		}
 	}
 
-	finalContext := fileContext + ragContext
-	if finalContext == "" {
-		return history
-	}
+	prompt += "问题：\n"
+	prompt += lastUserMsg
 
-	// 在最后一个用户消息后面附加知识库内容
+	// 替换最后一个用户消息为新的Prompt
 	if len(history) > 0 {
 		lastIdx := len(history) - 1
 		if history[lastIdx].Role == "user" {
-			// 为了防止 prompt 过长，这里可以做一点清理或截断
-			history[lastIdx].Content += finalContext
+			history[lastIdx].Content = prompt
 		}
 	}
+
 	return history
 }
 
@@ -261,6 +305,38 @@ func isBadTitle(title string, fallback string) bool {
 		}
 	}
 	return false
+}
+
+// cosineSimilarity 计算两个向量的余弦相似度
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return 0
+	}
+	
+	var dotProduct float32
+	var normA float32
+	var normB float32
+	
+	for i := range a {
+		dotProduct += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	
+	return dotProduct / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
+}
+
+// bytesToFloat32Slice 将字节数组转换为float32切片
+func bytesToFloat32Slice(b []byte) []float32 {
+	s := make([]float32, len(b)/4)
+	for i := range s {
+		s[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return s
 }
 
 func tryGenerateSmartTitle(conversationID uint, engine llm.Engine) {
