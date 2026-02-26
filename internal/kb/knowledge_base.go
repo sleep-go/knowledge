@@ -21,12 +21,60 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// ChunkProgress 文件分片进度信息
+type ChunkProgress struct {
+	FileName        string  `json:"file_name"`
+	TotalChunks     int     `json:"total_chunks"`
+	ProcessedChunks int     `json:"processed_chunks"`
+	Progress        float64 `json:"progress"`
+}
+
+// SyncProgress 同步进度信息
+type SyncProgress struct {
+	TotalFiles     int             `json:"total_files"`
+	ProcessedFiles int             `json:"processed_files"`
+	CurrentFile    string          `json:"current_file"`
+	Status         string          `json:"status"`
+	Progress       float64         `json:"progress"`
+	ChunkProgress  []ChunkProgress `json:"chunk_progress"`
+}
+
 type KnowledgeBase struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	progress   SyncProgress
+	progressMu sync.Mutex
 }
 
 func NewKnowledgeBase() *KnowledgeBase {
 	return &KnowledgeBase{}
+}
+
+// GetSyncProgress 获取当前同步进度
+func (kb *KnowledgeBase) GetSyncProgress() SyncProgress {
+	kb.progressMu.Lock()
+	defer kb.progressMu.Unlock()
+	return kb.progress
+}
+
+// UpdateSyncProgress 更新同步进度
+func (kb *KnowledgeBase) UpdateSyncProgress(progress SyncProgress) {
+	kb.progressMu.Lock()
+	defer kb.progressMu.Unlock()
+	kb.progress = progress
+}
+
+// ResetSyncProgress 重置同步进度
+func (kb *KnowledgeBase) ResetSyncProgress() {
+	kb.progressMu.Lock()
+	defer kb.progressMu.Unlock()
+	kb.progress = SyncProgress{
+		TotalFiles:     0,
+		ProcessedFiles: 0,
+		CurrentFile:    "",
+		Status:         "idle",
+		Progress:       0,
+		ChunkProgress:  []ChunkProgress{},
+	}
 }
 
 // AddFile 添加单个文件到知识库并立即处理
@@ -37,6 +85,12 @@ func (kb *KnowledgeBase) AddFile(path string) error {
 	}
 	if info.IsDir() {
 		return fmt.Errorf("path is a directory")
+	}
+
+	// 过滤以 .~ 开头的临时文件
+	filename := filepath.Base(path)
+	if strings.HasPrefix(filename, ".~") {
+		return fmt.Errorf("temporary file not supported: %s", filename)
 	}
 
 	// 只处理文本相关文件
@@ -72,6 +126,9 @@ func (kb *KnowledgeBase) ScanFolder() error {
 		return fmt.Errorf("knowledge base folder not set")
 	}
 
+	// 重置进度
+	kb.ResetSyncProgress()
+
 	// 收集所有文件信息
 	var files []struct {
 		path     string
@@ -80,11 +137,25 @@ func (kb *KnowledgeBase) ScanFolder() error {
 	}
 
 	// 第一遍：收集文件信息
+	kb.UpdateSyncProgress(SyncProgress{
+		TotalFiles:     0,
+		ProcessedFiles: 0,
+		CurrentFile:    "",
+		Status:         "scanning",
+		Progress:       0,
+	})
+
 	err = filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
+			return nil
+		}
+
+		// 过滤以 .~ 开头的临时文件
+		filename := filepath.Base(path)
+		if strings.HasPrefix(filename, ".~") {
 			return nil
 		}
 
@@ -105,6 +176,15 @@ func (kb *KnowledgeBase) ScanFolder() error {
 			checksum string
 		}{path, info, checksum})
 
+		// 更新进度
+		kb.UpdateSyncProgress(SyncProgress{
+			TotalFiles:     len(files),
+			ProcessedFiles: 0,
+			CurrentFile:    path,
+			Status:         "scanning",
+			Progress:       0,
+		})
+
 		return nil
 	})
 
@@ -113,12 +193,39 @@ func (kb *KnowledgeBase) ScanFolder() error {
 	}
 
 	// 第二遍：批量处理数据库操作
-	for _, file := range files {
+	totalFiles := len(files)
+	kb.UpdateSyncProgress(SyncProgress{
+		TotalFiles:     totalFiles,
+		ProcessedFiles: 0,
+		CurrentFile:    "",
+		Status:         "syncing",
+		Progress:       0,
+	})
+
+	for i, file := range files {
 		_, err = db.SaveKBFile(file.path, file.info.Size(), file.checksum)
 		if err != nil {
 			return err
 		}
+
+		// 更新进度
+		progress := float64(i+1) / float64(totalFiles) * 100
+		kb.UpdateSyncProgress(SyncProgress{
+			TotalFiles:     totalFiles,
+			ProcessedFiles: i + 1,
+			CurrentFile:    file.path,
+			Status:         "syncing",
+			Progress:       progress,
+		})
 	}
+
+	kb.UpdateSyncProgress(SyncProgress{
+		TotalFiles:     totalFiles,
+		ProcessedFiles: totalFiles,
+		CurrentFile:    "",
+		Status:         "scanned",
+		Progress:       100,
+	})
 
 	return nil
 }
@@ -139,12 +246,32 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 	}
 
 	if len(pendingFiles) == 0 {
+		kb.UpdateSyncProgress(SyncProgress{
+			TotalFiles:     0,
+			ProcessedFiles: 0,
+			CurrentFile:    "",
+			Status:         "idle",
+			Progress:       0,
+		})
 		return nil
 	}
+
+	totalFiles := len(pendingFiles)
+	processedCount := 0
+
+	// 更新进度为处理开始
+	kb.UpdateSyncProgress(SyncProgress{
+		TotalFiles:     totalFiles,
+		ProcessedFiles: 0,
+		CurrentFile:    "",
+		Status:         "processing",
+		Progress:       0,
+	})
 
 	// 并发处理文件
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(pendingFiles))
+	progressChan := make(chan db.KnowledgeBaseFile, len(pendingFiles))
 
 	// 控制并发数量
 	concurrencyLimit := 5
@@ -159,6 +286,15 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
+			// 更新当前处理的文件
+			kb.UpdateSyncProgress(SyncProgress{
+				TotalFiles:     totalFiles,
+				ProcessedFiles: processedCount,
+				CurrentFile:    file.Path,
+				Status:         "processing",
+				Progress:       float64(processedCount) / float64(totalFiles) * 100,
+			})
+
 			if err := kb.processFile(file); err != nil {
 				fmt.Printf("Error processing file %s: %v\n", file.Path, err)
 				_ = db.UpdateKBFileStatus(file.ID, "error")
@@ -167,12 +303,39 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 			}
 
 			_ = db.UpdateKBFileStatus(file.ID, "processed")
+			progressChan <- file
 		}(f)
 	}
+
+	// 处理进度更新
+	go func() {
+		for range pendingFiles {
+			<-progressChan
+			processedCount++
+			progress := float64(processedCount) / float64(totalFiles) * 100
+			kb.UpdateSyncProgress(SyncProgress{
+				TotalFiles:     totalFiles,
+				ProcessedFiles: processedCount,
+				CurrentFile:    "",
+				Status:         "processing",
+				Progress:       progress,
+			})
+		}
+	}()
 
 	// 等待所有处理完成
 	wg.Wait()
 	close(errChan)
+	close(progressChan)
+
+	// 更新进度为处理完成
+	kb.UpdateSyncProgress(SyncProgress{
+		TotalFiles:     totalFiles,
+		ProcessedFiles: totalFiles,
+		CurrentFile:    "",
+		Status:         "completed",
+		Progress:       100,
+	})
 
 	// 检查是否有错误
 	for err := range errChan {
@@ -305,9 +468,26 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		return nil
 	}
 
+	// 创建文件分片进度对象
+	fileName := filepath.Base(f.Path)
+	totalChunks := len(validChunks)
+	processedChunks := 0
+
+	// 更新同步进度，添加分片进度信息
+	kb.progressMu.Lock()
+	chunkProgress := ChunkProgress{
+		FileName:        fileName,
+		TotalChunks:     totalChunks,
+		ProcessedChunks: 0,
+		Progress:        0,
+	}
+	kb.progress.ChunkProgress = []ChunkProgress{chunkProgress}
+	kb.progressMu.Unlock()
+
 	// 并发处理切片的向量生成和存储
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(validChunks))
+	progressChan := make(chan struct{}, len(validChunks))
 
 	// 控制并发数量
 	chunkConcurrencyLimit := 10
@@ -334,12 +514,35 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 				errChan <- err
 				return
 			}
+
+			// 处理完成一个分片，发送进度更新
+			progressChan <- struct{}{}
 		}(chunk)
 	}
+
+	// 处理分片进度更新
+	go func() {
+		for range validChunks {
+			<-progressChan
+			processedChunks++
+			progress := float64(processedChunks) / float64(totalChunks) * 100
+
+			// 更新分片进度
+			kb.progressMu.Lock()
+			kb.progress.ChunkProgress = []ChunkProgress{{
+				FileName:        fileName,
+				TotalChunks:     totalChunks,
+				ProcessedChunks: processedChunks,
+				Progress:        progress,
+			}}
+			kb.progressMu.Unlock()
+		}
+	}()
 
 	// 等待所有处理完成
 	wg.Wait()
 	close(errChan)
+	close(progressChan)
 
 	// 检查是否有错误
 	for err := range errChan {

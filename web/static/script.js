@@ -16,6 +16,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const syncKBBtn = document.getElementById('sync-kb-btn');
     const resetKBBtn = document.getElementById('reset-kb-btn');
     const syncStatus = document.getElementById('sync-status');
+    const syncProgressContainer = document.getElementById('sync-progress-container');
+    const syncProgressBar = document.getElementById('sync-progress-bar');
+    const syncProgressText = document.getElementById('sync-progress-text');
+    const syncCurrentFile = document.getElementById('sync-current-file');
+    const chunkProgressContainer = document.getElementById('chunk-progress-container');
+    const chunkProgressContent = document.getElementById('chunk-progress-content');
     const kbFileList = document.getElementById('kb-file-list');
     const currentConversationTitle = document.getElementById('current-conversation-title');
     const uploadKBBtn = document.getElementById('upload-kb-btn');
@@ -952,34 +958,130 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // 获取同步进度
+    async function getSyncProgress() {
+        try {
+            const res = await fetch('/api/kb/sync/progress');
+            if (res.ok) {
+                return await res.json();
+            }
+        } catch (err) {
+            console.error('Failed to get sync progress:', err);
+        }
+        return null;
+    }
+
+    // 更新进度条
+    function updateProgressBar(progress) {
+        if (!progress) return;
+        
+        syncProgressBar.style.width = `${progress.progress}%`;
+        syncProgressText.textContent = `${Math.round(progress.progress)}%`;
+        syncCurrentFile.textContent = progress.current_file || '';
+        
+        // 根据状态更新文本
+        switch (progress.status) {
+            case 'scanning':
+                syncStatus.textContent = '正在扫描文件...';
+                break;
+            case 'syncing':
+                syncStatus.textContent = '正在同步文件...';
+                break;
+            case 'processing':
+                syncStatus.textContent = '正在处理文件...';
+                break;
+            case 'completed':
+                syncStatus.textContent = '同步完成';
+                break;
+            case 'scanned':
+                syncStatus.textContent = '扫描完成，准备处理...';
+                break;
+            case 'idle':
+                syncStatus.textContent = '就绪';
+                break;
+            default:
+                syncStatus.textContent = progress.status || '正在同步...';
+        }
+        
+        // 更新文件分片进度
+        if (progress.chunk_progress && progress.chunk_progress.length > 0) {
+            chunkProgressContainer.style.display = 'block';
+            chunkProgressContent.innerHTML = '';
+            
+            progress.chunk_progress.forEach(chunk => {
+                const chunkItem = document.createElement('div');
+                chunkItem.className = 'chunk-progress-item';
+                
+                chunkItem.innerHTML = `
+                    <div class="chunk-progress-header">
+                        <span>${chunk.file_name}</span>
+                        <span>${Math.round(chunk.progress)}%</span>
+                    </div>
+                    <div class="chunk-progress-bar">
+                        <div class="chunk-progress-fill" style="width: ${chunk.progress}%"></div>
+                    </div>
+                    <div class="chunk-progress-info">
+                        已处理 ${chunk.processed_chunks}/${chunk.total_chunks} 个分片
+                    </div>
+                `;
+                
+                chunkProgressContent.appendChild(chunkItem);
+            });
+        } else {
+            chunkProgressContainer.style.display = 'none';
+        }
+    }
+
     syncKBBtn.addEventListener('click', async () => {
         syncStatus.textContent = '正在同步...';
         syncKBBtn.disabled = true;
         resetKBBtn.disabled = true;
+        syncProgressContainer.style.display = 'block';
+        
         try {
             const res = await fetch('/api/kb/sync', { method: 'POST' });
             if (res.ok) {
                 syncStatus.textContent = '同步已开始';
+                
+                // 定期获取同步进度
+                const progressTimer = setInterval(async () => {
+                    const progress = await getSyncProgress();
+                    updateProgressBar(progress);
+                }, 1000);
+                
                 // 每隔几秒刷新一下文件列表
-                const timer = setInterval(async () => {
+                const fileListTimer = setInterval(async () => {
                     const finished = await loadKBFiles();
                     if (finished) {
-                        clearInterval(timer);
+                        clearInterval(fileListTimer);
+                        clearInterval(progressTimer);
+                        
+                        // 最后一次更新进度
+                        const finalProgress = await getSyncProgress();
+                        updateProgressBar(finalProgress);
+                        
                         syncStatus.textContent = '同步完成';
                         syncKBBtn.disabled = false;
                         resetKBBtn.disabled = false;
+                        
+                        // 延迟隐藏进度条
+                        setTimeout(() => {
+                            syncProgressContainer.style.display = 'none';
+                        }, 2000);
                     }
                 }, 2000);
             } else {
                 syncStatus.textContent = '同步失败';
                 syncKBBtn.disabled = false;
                 resetKBBtn.disabled = false;
+                syncProgressContainer.style.display = 'none';
             }
         } catch (err) {
             console.error('Failed to sync KB:', err);
             syncStatus.textContent = '同步出错';
             syncKBBtn.disabled = false;
             resetKBBtn.disabled = false;
+            syncProgressContainer.style.display = 'none';
         }
     });
 

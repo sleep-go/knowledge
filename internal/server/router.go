@@ -75,6 +75,7 @@ func SetupRouter(staticFS embed.FS, engine llm.Engine, kbase *kb.KnowledgeBase) 
 		api.DELETE("/kb/files/:id", s.DeleteKBFile)
 		api.POST("/kb/files/batch-delete", s.BatchDeleteKBFiles)
 		api.POST("/kb/sync", s.SyncKB)
+		api.GET("/kb/sync/progress", s.GetSyncProgress)
 		api.POST("/kb/upload", s.UploadKBFile)
 		api.POST("/kb/reset", s.ResetKB)
 	}

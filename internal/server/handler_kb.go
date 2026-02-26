@@ -242,6 +242,12 @@ func (s *Server) BatchDeleteKBFiles(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": len(req.IDs)})
 }
 
+// GetSyncProgress 获取知识库同步进度
+func (s *Server) GetSyncProgress(c *gin.Context) {
+	progress := s.kbase.GetSyncProgress()
+	c.JSON(http.StatusOK, progress)
+}
+
 func (s *Server) GetSystemPrompt(c *gin.Context) {
 	prompt, _ := db.GetSystemPrompt()
 	c.JSON(http.StatusOK, gin.H{"prompt": prompt})

@@ -682,6 +682,91 @@ footer {
     color: #059669;
 }
 
+/* 进度条样式 */
+.progress-container {
+    margin-top: 12px;
+    display: none;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 8px;
+    background-color: #f3f4f6;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.progress-fill {
+    height: 100%;
+    background-color: #3b82f6;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.progress-info {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.progress-info .current-file {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+}
+
+/* 分片进度样式 */
+.chunk-progress-container {
+    margin-top: 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    background-color: #f8fafc;
+}
+
+.chunk-progress-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #374151;
+    margin-bottom: 8px;
+}
+
+.chunk-progress-item {
+    margin-bottom: 8px;
+}
+
+.chunk-progress-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #6b7280;
+    margin-bottom: 4px;
+}
+
+.chunk-progress-bar {
+    width: 100%;
+    height: 6px;
+    background-color: #f3f4f6;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.chunk-progress-fill {
+    height: 100%;
+    background-color: #10b981;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.chunk-progress-info {
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 2px;
+}
+
 .file-list {
     margin-top: 12px;
     border: 1px solid #f3f4f6;
