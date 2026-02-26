@@ -1246,6 +1246,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 return true;
             }
 
+            // 获取同步进度，包含文件Chunk进度
+            let syncProgress = null;
+            try {
+                const progressRes = await fetch('/api/kb/sync/progress');
+                if (progressRes.ok) {
+                    syncProgress = await progressRes.json();
+                }
+            } catch (err) {
+                console.error('Failed to get sync progress:', err);
+            }
+
             files.forEach(f => {
                 const item = document.createElement('div');
                 item.className = 'file-item';
@@ -1285,10 +1296,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 left.appendChild(nameSpan);
 
+                // 获取文件的Chunk进度
+                let progressText = '';
+                if (syncProgress && syncProgress.chunk_progress) {
+                    const chunkProgress = syncProgress.chunk_progress.find(cp => cp.file_name === fileName);
+                    if (chunkProgress) {
+                        progressText = ` (${Math.round(chunkProgress.progress)}%)`;
+                    }
+                }
+
                 const right = document.createElement('div');
                 right.className = 'file-item-right';
                 right.innerHTML = `
-                    <span class="file-status ${statusClass}">${statusText}</span>
+                    <span class="file-status ${statusClass}">${statusText}${progressText}</span>
                     <button class="file-delete-btn" style="background: none; border: none; cursor: pointer; color: #999; font-size: 1.2em; padding: 0 5px;">&times;</button>
                 `;
                 
@@ -1296,7 +1316,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 deleteBtn.addEventListener('click', async (e) => {
                     e.stopPropagation();
                     if (!confirm(`确定要删除文件 "${fileName}" 吗？\n这将同时删除磁盘上的物理文件。`)) return;
-                     
+                      
                     try {
                         const res = await fetch(`/api/kb/files/${f.ID}`, { method: 'DELETE' });
                         if (res.ok) {
