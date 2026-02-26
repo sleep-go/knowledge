@@ -454,7 +454,7 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	}
 
 	// 简单切片：按行或者按固定长度
-	chunks := splitText(content, 500, 100) // 每 500 字一个切片，100 字重叠，减少分片大小以适应上下文限制
+	chunks := splitText(content, 1000, 200) // 每 1000 字一个切片，200 字重叠，增大分片大小以提高处理效率
 
 	// 过滤空切片
 	var validChunks []string
