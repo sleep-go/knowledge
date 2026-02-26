@@ -1,0 +1,5 @@
+- [x] Clicking a file in the KB file list opens a preview modal.
+- [x] The preview modal displays the content of text/markdown files correctly.
+- [x] A build script `scripts/build_app.sh` exists and is executable.
+- [x] Running the build script generates a valid `.app` bundle.
+- [x] The generated `.app` can be launched on MacOS.

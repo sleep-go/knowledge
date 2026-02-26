@@ -32,12 +32,27 @@ func (s *Server) DeleteConversation(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid conversation id"})
 		return
 	}
-	convID := uint(id)
-	if err := db.DeleteConversation(convID); err != nil {
+	if err := db.DeleteConversation(uint(id)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
+}
+
+func (s *Server) BatchDeleteConversations(c *gin.Context) {
+	var req struct {
+		IDs []uint `json:"ids" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	if err := db.DeleteConversations(req.IDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "success", "deleted": len(req.IDs)})
 }
 
 func (s *Server) CreateConversation(c *gin.Context) {

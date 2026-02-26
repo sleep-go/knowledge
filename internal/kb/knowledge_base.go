@@ -117,6 +117,26 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 	return nil
 }
 
+// GetFileContent 获取文件内容
+func (kb *KnowledgeBase) GetFileContent(path string) (string, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".pdf":
+		return extractTextFromPDF(path)
+	case ".docx":
+		return extractTextFromDocx(path)
+	case ".xlsx":
+		return extractTextFromXlsx(path)
+	default:
+		// 默认处理文本文件
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+}
+
 func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	ext := strings.ToLower(filepath.Ext(f.Path))
 	var content string

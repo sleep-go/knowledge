@@ -1,0 +1,7 @@
+- [ ] Can enter "Manage" mode in conversation list
+- [ ] Can select multiple conversations
+- [ ] Can batch delete selected conversations
+- [ ] Can select multiple files in settings
+- [ ] Can batch delete selected files
+- [ ] Verify database records are removed
+- [ ] Verify physical files are removed (for KB files)

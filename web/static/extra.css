@@ -1,75 +1,22 @@
 
-/* Think Block Styles */
-.think-block {
-    margin: 10px 0;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    background-color: #f8fafc;
-    overflow: hidden;
+/* Batch Actions styles moved to style.css */
+
+/* Conversation Checkbox styles moved to style.css */
+
+/* File Checkbox */
+.file-checkbox {
+    margin-right: 10px;
+    cursor: pointer;
 }
 
-.think-title {
-    padding: 8px 12px;
-    background-color: #f1f5f9;
-    color: #64748b;
-    font-size: 12px;
-    font-weight: 600;
-    border-bottom: 1px solid #e2e8f0;
-    user-select: none;
-    cursor: pointer;
+.file-item-left {
     display: flex;
     align-items: center;
-    gap: 6px;
-}
-
-.think-title::before {
-    content: "▼";
-    display: inline-block;
-    font-size: 10px;
-    transition: transform 0.2s;
-}
-
-.think-block.collapsed .think-title::before {
-    transform: rotate(-90deg);
-}
-
-.think-block.collapsed .think-title {
-    border-bottom: none;
-}
-
-.think-content {
-    padding: 12px;
-    font-size: 13px;
-    color: #475569;
-    background-color: #ffffff;
-    display: block;
-}
-
-.think-block.collapsed .think-content {
-    display: none;
-}
-
-/* Document Block Styles */
-.document-block {
-    margin: 10px 0;
-    border: 1px solid #d1fae5;
-    border-radius: 8px;
-    background-color: #ecfdf5;
     overflow: hidden;
 }
 
-.document-title {
-    padding: 8px 12px;
-    background-color: #d1fae5;
-    color: #065f46;
-    font-size: 12px;
-    font-weight: 600;
-    border-bottom: 1px solid #a7f3d0;
-}
-
-.document-content {
-    padding: 12px;
-    font-size: 13px;
-    color: #064e3b;
-    background-color: #ffffff;
+.file-item-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }

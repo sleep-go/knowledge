@@ -156,7 +156,7 @@ func (s *Server) ChatStream(c *gin.Context) {
 		return
 	}
 
-	history := BuildHistoryWithKB(dbMessages, 10, req.Message)
+	history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
 
 	response, err := WritePlainTokens(c, func(yield func(string) bool) error {
 		return s.engine.ChatStream(history, yield)
@@ -204,7 +204,7 @@ func (s *Server) ChatWithConversation(c *gin.Context) {
 		history = append(history, llm.ChatMessage{Role: dbMessages[i].Role, Content: dbMessages[i].Content})
 	}
 
-	history = augmentHistoryWithKB(history, req.Message)
+	history = augmentHistoryWithKB(s.kbase, history, req.Message)
 
 	response, err := s.engine.Chat(history)
 	if err != nil {
@@ -246,7 +246,7 @@ func (s *Server) ChatStreamWithConversation(c *gin.Context) {
 		return
 	}
 
-	history := BuildHistoryWithKB(dbMessages, 10, req.Message)
+	history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
 
 	response, err := WritePlainTokens(c, func(yield func(string) bool) error {
 		return s.engine.ChatStream(history, yield)
@@ -284,7 +284,7 @@ func (s *Server) RetryStream(c *gin.Context) {
 		return
 	}
 
-	history := BuildRetryHistoryWithKB(dbMessages, 5)
+	history := BuildRetryHistoryWithKB(s.kbase, dbMessages, 5)
 	fmt.Printf("[Retry] History length: %d\n", len(history))
 	for i, msg := range history {
 		fmt.Printf("[Retry] Msg %d (%s): %s\n", i, msg.Role, truncateRunes(msg.Content, 50))

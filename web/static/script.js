@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebarToggle = document.getElementById('sidebar-toggle');
     const settingsBtn = document.getElementById('settings-btn');
     const settingsModal = document.getElementById('settings-modal');
+    const modelSelect = document.getElementById('model-select');
     const closeSettings = document.getElementById('close-settings');
     const saveKBFolder = document.getElementById('save-kb-folder');
     const selectKBFolder = document.getElementById('select-kb-folder');
@@ -22,11 +23,30 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatFileInput = document.getElementById('chat-file-input');
     const attachBtn = document.getElementById('attach-btn');
     const filePreviewContainer = document.getElementById('file-preview-container');
+
+    // 预览模态框元素
+    const previewModal = document.getElementById('preview-modal');
+    const previewTitle = document.getElementById('preview-title');
+    const previewBody = document.getElementById('preview-body');
+    const closePreviewBtn = document.getElementById('close-preview');
+
+    // Batch Operations Elements
+    const manageChatsBtn = document.getElementById('manage-chats-btn');
+    const batchActions = document.getElementById('batch-actions');
+    const selectAllChatsBtn = document.getElementById('select-all-chats-btn');
+    const deleteSelectedChatsBtn = document.getElementById('delete-selected-chats-btn');
+    const cancelManageBtn = document.getElementById('cancel-manage-btn');
+    const deleteSelectedFilesBtn = document.getElementById('delete-selected-files-btn');
     
     const LOADING_HTML = '<div class="loading-dots"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>';
 
     let currentConversationId = null;
     let conversations = [];
+    
+    // Batch State
+    let isManagementMode = false;
+    let selectedConversationIds = new Set();
+    let selectedFileIds = new Set();
 
     function escapeHtml(str) {
         return String(str)
@@ -198,6 +218,26 @@ document.addEventListener('DOMContentLoaded', () => {
             item.className = 'conversation-item' + (String(c.ID) === String(currentConversationId) ? ' active' : '');
             item.dataset.id = String(c.ID);
 
+            // Batch Selection Checkbox (Always render, hidden by CSS)
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'conversation-checkbox';
+            checkbox.checked = selectedConversationIds.has(c.ID);
+            checkbox.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (checkbox.checked) {
+                    selectedConversationIds.add(c.ID);
+                } else {
+                    selectedConversationIds.delete(c.ID);
+                }
+                updateBatchDeleteButtonState();
+            });
+            item.appendChild(checkbox);
+
+            // Content Wrapper
+            const content = document.createElement('div');
+            content.className = 'conversation-content';
+
             const title = document.createElement('div');
             title.className = 'conversation-item-title';
             title.textContent = c.Title || `Chat ${c.ID}`;
@@ -206,9 +246,14 @@ document.addEventListener('DOMContentLoaded', () => {
             meta.className = 'conversation-item-meta';
             meta.textContent = formatRelativeTime(c.UpdatedAt || c.CreatedAt);
 
+            content.appendChild(title);
+            content.appendChild(meta);
+            item.appendChild(content);
+
             const actions = document.createElement('div');
             actions.className = 'conversation-item-actions';
 
+            // Delete Button (Always render, hidden by CSS in batch mode)
             const deleteBtn = document.createElement('button');
             deleteBtn.type = 'button';
             deleteBtn.className = 'conversation-delete-btn';
@@ -244,14 +289,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     alert('删除失败');
                 }
             });
-
             actions.appendChild(deleteBtn);
-
-            item.appendChild(title);
-            item.appendChild(meta);
             item.appendChild(actions);
 
             item.addEventListener('click', async () => {
+                if (isManagementMode) {
+                    // Toggle selection on item click
+                    const id = c.ID;
+                    if (selectedConversationIds.has(id)) {
+                        selectedConversationIds.delete(id);
+                        checkbox.checked = false;
+                    } else {
+                        selectedConversationIds.add(id);
+                        checkbox.checked = true;
+                    }
+                    updateBatchDeleteButtonState();
+                    return;
+                }
+                
                 const id = Number(item.dataset.id);
                 if (!id) return;
                 await switchConversation(id);
@@ -262,7 +317,86 @@ document.addEventListener('DOMContentLoaded', () => {
 
             conversationList.appendChild(item);
         });
+        
+        updateBatchDeleteButtonState();
     }
+
+    function updateBatchDeleteButtonState() {
+        if (selectedConversationIds.size > 0) {
+            deleteSelectedChatsBtn.textContent = `删除选中 (${selectedConversationIds.size})`;
+            deleteSelectedChatsBtn.disabled = false;
+        } else {
+            deleteSelectedChatsBtn.textContent = '删除选中';
+            deleteSelectedChatsBtn.disabled = true;
+        }
+    }
+
+    function toggleManagementMode(enabled) {
+        isManagementMode = enabled;
+        selectedConversationIds.clear();
+        
+        const sidebar = document.querySelector('.sidebar');
+        if (enabled) {
+            sidebar.classList.add('batch-mode');
+            batchActions.classList.add('active');
+            sidebarToggle.style.display = 'none'; 
+        } else {
+            sidebar.classList.remove('batch-mode');
+            batchActions.classList.remove('active');
+            sidebarToggle.style.display = '';
+        }
+        
+        // Reset checkboxes
+        document.querySelectorAll('.conversation-checkbox').forEach(cb => cb.checked = false);
+        updateBatchDeleteButtonState();
+    }
+
+    // Batch Action Event Listeners
+    manageChatsBtn.addEventListener('click', () => {
+        toggleManagementMode(true);
+    });
+
+    cancelManageBtn.addEventListener('click', () => {
+        toggleManagementMode(false);
+    });
+
+    selectAllChatsBtn.addEventListener('click', () => {
+        const allCheckboxes = document.querySelectorAll('.conversation-checkbox');
+        if (selectedConversationIds.size === conversations.length) {
+            selectedConversationIds.clear();
+            allCheckboxes.forEach(cb => cb.checked = false);
+        } else {
+            conversations.forEach(c => selectedConversationIds.add(c.ID));
+            allCheckboxes.forEach(cb => cb.checked = true);
+        }
+        updateBatchDeleteButtonState();
+    });
+
+    deleteSelectedChatsBtn.addEventListener('click', async () => {
+        if (selectedConversationIds.size === 0) return;
+        if (!confirm(`确定要删除选中的 ${selectedConversationIds.size} 个会话吗？`)) return;
+
+        try {
+            const ids = Array.from(selectedConversationIds);
+            const res = await fetch('/api/conversations/batch-delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids })
+            });
+            
+            if (!res.ok) {
+                const t = await res.text();
+                throw new Error(t);
+            }
+
+            // Refresh
+            await loadConversations();
+            toggleManagementMode(false);
+        } catch (err) {
+            console.error(err);
+            alert('批量删除失败: ' + err.message);
+        }
+    });
 
     function setCurrentConversation(id) {
         currentConversationId = id;
@@ -520,9 +654,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 // Append file info
                 if (!message) {
-                    message = `请分析上传的文件: ${file.name}`;
+                    message = `请分析上传的文件: [${file.name}]`;
                 } else {
-                    message += `\n\n[已上传文件: ${file.name}]`;
+                    message += `\n\n[已上传文件: [${file.name}]`;
                 }
             } catch (err) {
                 console.error(err);
@@ -659,6 +793,7 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsModal.style.display = 'block';
         loadSettings();
         loadKBFiles();
+        loadModels();
     });
 
     closeSettings.addEventListener('click', () => {
@@ -682,6 +817,64 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Failed to load settings:', err);
         }
     }
+
+    async function loadModels() {
+        try {
+            const res = await fetch('/api/models');
+            if (!res.ok) throw new Error('Failed to fetch models');
+            const data = await res.json();
+            
+            modelSelect.innerHTML = '';
+            if (data.models && Array.isArray(data.models)) {
+                data.models.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model;
+                    option.textContent = model;
+                    modelSelect.appendChild(option);
+                });
+            }
+            
+            if (data.current_model) {
+                modelSelect.value = data.current_model;
+            }
+        } catch (err) {
+            console.error('Failed to load models:', err);
+        }
+    }
+
+    modelSelect.addEventListener('change', async function() {
+        const model = this.value;
+        const selectedOption = this.options[this.selectedIndex];
+        const originalText = selectedOption.text;
+
+        // Disable controls and show loading state
+        this.disabled = true;
+        if (closeSettings) closeSettings.disabled = true;
+        selectedOption.text = `${originalText} (Switching...)`;
+
+        try {
+            const res = await fetch('/api/models/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: model })
+            });
+            
+            if (res.ok) {
+                console.log('Model switched to', model);
+            } else {
+                const t = await res.text();
+                alert('Failed to switch model: ' + t);
+            }
+        } catch (err) {
+            console.error('Error switching model:', err);
+            alert('Error switching model');
+        } finally {
+            // Restore state
+            selectedOption.text = originalText;
+            this.disabled = false;
+            if (closeSettings) closeSettings.disabled = false;
+        }
+    });
 
     saveKBFolder.addEventListener('click', async () => {
         const folder = kbFolderInput.value.trim();
@@ -809,11 +1002,86 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // 预览相关函数
+    function getFileExtension(filename) {
+        return filename.slice((filename.lastIndexOf(".") - 1 >>> 0) + 2).toLowerCase();
+    }
+
+    async function openPreview(fileName) {
+        previewModal.style.display = 'block';
+        previewTitle.textContent = fileName;
+        previewBody.innerHTML = '<div class="preview-loading"><div class="loading-dots"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div></div>';
+
+        const ext = getFileExtension(fileName);
+        const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
+        const codeExts = ['txt', 'md', 'go', 'js', 'css', 'html', 'json', 'py', 'c', 'cpp', 'h', 'hpp', 'sh', 'bash', 'zsh', 'yaml', 'yml', 'xml', 'sql', 'java', 'rs', 'ts', 'tsx', 'jsx'];
+
+        // 如果是图片，直接显示
+        if (imageExts.includes(ext)) {
+            const img = new Image();
+            img.src = `/api/kb/download?file=${encodeURIComponent(fileName)}`;
+            img.onload = () => {
+                previewBody.innerHTML = '';
+                previewBody.appendChild(img);
+            };
+            img.onerror = () => {
+                previewBody.innerHTML = '<div class="preview-error">图片加载失败</div>';
+            };
+            return;
+        }
+
+        // 如果是文本或代码，先获取内容
+        if (codeExts.includes(ext)) {
+            try {
+                const res = await fetch(`/api/kb/download?file=${encodeURIComponent(fileName)}`);
+                if (!res.ok) throw new Error('Failed to load file content');
+                const text = await res.text();
+                
+                if (ext === 'md') {
+                    // Markdown 渲染
+                    previewBody.innerHTML = renderMarkdown(text);
+                } else {
+                    // 代码高亮
+                    const pre = document.createElement('pre');
+                    const code = document.createElement('code');
+                    code.className = `language-${ext}`;
+                    code.textContent = text;
+                    pre.appendChild(code);
+                    previewBody.innerHTML = '';
+                    previewBody.appendChild(pre);
+                }
+            } catch (err) {
+                console.error(err);
+                previewBody.innerHTML = `<div class="preview-error">无法加载文件内容: ${err.message}</div>`;
+            }
+            return;
+        }
+
+        previewBody.innerHTML = '<div class="preview-error">不支持预览此类型的文件，请下载查看。</div>';
+    }
+
+    closePreviewBtn.addEventListener('click', () => {
+        previewModal.style.display = 'none';
+    });
+
+    window.addEventListener('click', (e) => {
+        if (e.target === previewModal) {
+            previewModal.style.display = 'none';
+        }
+    });
+
     async function loadKBFiles() {
         try {
             const res = await fetch('/api/kb/files');
-            const files = await res.json();
+            const rawFiles = await res.json();
+            // 过滤掉以 ".~" 开头的临时文件
+            const files = rawFiles.filter(f => {
+                const fileName = f.Path.split('/').pop();
+                return !fileName.startsWith('.~');
+            });
             kbFileList.innerHTML = '';
+            selectedFileIds.clear();
+            updateFileBatchBtn();
             
             let allProcessed = true;
             if (files.length === 0) {
@@ -832,10 +1100,62 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 if (f.Status !== 'processed') allProcessed = false;
 
-                item.innerHTML = `
-                    <span title="${f.Path}">${fileName}</span>
+                // Checkbox
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.className = 'file-checkbox';
+                checkbox.dataset.id = f.ID;
+                checkbox.addEventListener('change', () => {
+                    if (checkbox.checked) {
+                        selectedFileIds.add(f.ID);
+                    } else {
+                        selectedFileIds.delete(f.ID);
+                    }
+                    updateFileBatchBtn();
+                });
+
+                const left = document.createElement('div');
+                left.className = 'file-item-left';
+                left.appendChild(checkbox);
+                
+                const nameSpan = document.createElement('span');
+                nameSpan.title = f.Path;
+                nameSpan.textContent = fileName;
+                nameSpan.style.cssText = 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 10px; cursor: pointer; color: #3b82f6; text-decoration: underline;';
+                nameSpan.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openPreview(fileName);
+                });
+                left.appendChild(nameSpan);
+
+                const right = document.createElement('div');
+                right.className = 'file-item-right';
+                right.innerHTML = `
                     <span class="file-status ${statusClass}">${statusText}</span>
+                    <button class="file-delete-btn" style="background: none; border: none; cursor: pointer; color: #999; font-size: 1.2em; padding: 0 5px;">&times;</button>
                 `;
+                
+                const deleteBtn = right.querySelector('.file-delete-btn');
+                deleteBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`确定要删除文件 "${fileName}" 吗？\n这将同时删除磁盘上的物理文件。`)) return;
+                     
+                    try {
+                        const res = await fetch(`/api/kb/files/${f.ID}`, { method: 'DELETE' });
+                        if (res.ok) {
+                            await loadKBFiles();
+                        } else {
+                            const data = await res.json();
+                            alert('删除失败: ' + (data.error || 'Unknown error'));
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        alert('删除出错');
+                    }
+                });
+                
+                item.appendChild(left);
+                item.appendChild(right);
                 kbFileList.appendChild(item);
             });
             return allProcessed;
@@ -844,6 +1164,39 @@ document.addEventListener('DOMContentLoaded', () => {
             return true;
         }
     }
+
+    function updateFileBatchBtn() {
+        if (selectedFileIds.size > 0) {
+            deleteSelectedFilesBtn.style.display = 'block';
+            deleteSelectedFilesBtn.textContent = `删除选中 (${selectedFileIds.size})`;
+        } else {
+            deleteSelectedFilesBtn.style.display = 'none';
+        }
+    }
+
+    deleteSelectedFilesBtn.addEventListener('click', async () => {
+        if (selectedFileIds.size === 0) return;
+        if (!confirm(`确定要删除选中的 ${selectedFileIds.size} 个文件吗？\n这将同时删除磁盘上的物理文件。`)) return;
+
+        try {
+            const ids = Array.from(selectedFileIds);
+            const res = await fetch('/api/kb/files/batch-delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids })
+            });
+            
+            if (!res.ok) {
+                const t = await res.text();
+                throw new Error(t);
+            }
+
+            await loadKBFiles();
+        } catch (err) {
+            console.error(err);
+            alert('批量删除失败: ' + err.message);
+        }
+    });
 
     // 初始化
     loadConversations().catch(err => console.error('Failed to load conversations:', err));

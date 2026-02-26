@@ -2,6 +2,7 @@ package server
 
 import (
 	"knowledge/internal/db"
+	"knowledge/internal/kb"
 	"knowledge/internal/llm"
 )
 
@@ -27,20 +28,20 @@ func BuildHistory(dbMessages []db.Message, tail int) []llm.ChatMessage {
 
 // BuildHistoryWithKB 从数据库消息构建带知识库上下文的聊天历史
 // 该函数会截取最后tail条消息，转换为llm.ChatMessage格式，并添加知识库上下文
-func BuildHistoryWithKB(dbMessages []db.Message, tail int, seed string) []llm.ChatMessage {
+func BuildHistoryWithKB(kbase *kb.KnowledgeBase, dbMessages []db.Message, tail int, seed string) []llm.ChatMessage {
 	history := BuildHistory(dbMessages, tail)
-	return augmentHistoryWithKB(history, seed)
+	return augmentHistoryWithKB(kbase, history, seed)
 }
 
 // BuildRetryHistoryWithKB 为重试操作构建带知识库上下文的聊天历史
 // 该函数会截取最后tail条消息，转换为llm.ChatMessage格式，
 // 如果最后一条是用户消息，则添加知识库上下文
-func BuildRetryHistoryWithKB(dbMessages []db.Message, tail int) []llm.ChatMessage {
+func BuildRetryHistoryWithKB(kbase *kb.KnowledgeBase, dbMessages []db.Message, tail int) []llm.ChatMessage {
 	history := BuildHistory(dbMessages, tail)
 	
 	// 如果历史记录不为空且最后一条是用户消息，则添加知识库上下文
 	if len(history) > 0 && history[len(history)-1].Role == "user" {
-		return augmentHistoryWithKB(history, history[len(history)-1].Content)
+		return augmentHistoryWithKB(kbase, history, history[len(history)-1].Content)
 	}
 	
 	return history

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"knowledge/internal/db"
@@ -33,6 +34,35 @@ func (s *Server) UpdateKBFolder(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) DownloadKBFile(c *gin.Context) {
+	fileName := c.Query("file")
+	if fileName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File parameter is required"})
+		return
+	}
+
+	// Sanitize filename
+	cleanName := filepath.Base(fileName)
+
+	// Get KB folder
+	folder, err := db.GetKBFolder()
+	if err != nil || folder == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Knowledge base folder not configured"})
+		return
+	}
+
+	// Join path
+	filePath := filepath.Join(folder, cleanName)
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	c.File(filePath)
 }
 
 func (s *Server) SelectKBFolder(c *gin.Context) {
@@ -120,4 +150,36 @@ func (s *Server) UploadKBFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "path": dst})
+}
+
+func (s *Server) DeleteKBFile(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	if err := db.DeleteKBFile(uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) BatchDeleteKBFiles(c *gin.Context) {
+	var req struct {
+		IDs []uint `json:"ids" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := db.DeleteKBFiles(req.IDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": len(req.IDs)})
 }

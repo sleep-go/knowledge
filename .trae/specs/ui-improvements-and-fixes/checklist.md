@@ -1,0 +1,7 @@
+- [x] Chat list delete button does not overlap title
+- [x] Database tables do not use `deleted_at` (soft delete disabled)
+- [x] Can delete files from the file list in settings
+- [x] Deleted files are removed from disk and database
+- [x] Uploaded files in chat are clickable and can be viewed/downloaded
+- [x] Can see list of models in settings
+- [x] Can switch model from settings

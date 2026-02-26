@@ -13,9 +13,15 @@
             <div class="sidebar-header">
                 <div class="sidebar-title">对话</div>
                 <div class="sidebar-header-actions">
+                    <button id="manage-chats-btn" type="button" title="管理会话" style="font-size: 14px;">🖊️</button>
                     <button id="new-chat-btn" type="button" title="新建对话">+</button>
                     <button id="settings-btn" type="button" title="设置">⚙️</button>
                 </div>
+            </div>
+            <div class="batch-actions" id="batch-actions">
+                <button id="select-all-chats-btn" class="batch-btn">全选</button>
+                <button id="delete-selected-chats-btn" class="batch-btn delete">删除选中</button>
+                <button id="cancel-manage-btn" class="batch-btn">取消</button>
             </div>
             <div class="conversation-list" id="conversation-list"></div>
         </aside>
@@ -52,6 +58,11 @@
             </div>
             <div class="modal-body">
                 <div class="setting-item">
+                    <label>模型选择：</label>
+                    <select id="model-select" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </select>
+                </div>
+                <div class="setting-item">
                     <label>知识库本地目录：</label>
                     <div class="input-group">
                         <input type="text" id="kb-folder-input" placeholder="例如: /Users/sleep/Documents/kb">
@@ -76,11 +87,27 @@
                     </div>
                 </div>
                 <div class="setting-item">
-                    <label>文件列表：</label>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <label style="margin-bottom: 0;">文件列表：</label>
+                        <button id="delete-selected-files-btn" class="secondary-btn" style="padding: 2px 8px; font-size: 12px; color: #ef4444; border-color: #ef4444; display: none;">删除选中</button>
+                    </div>
                     <div id="kb-file-list" class="file-list">
                         <!-- 文件列表将通过 JS 动态加载 -->
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 预览模态框 -->
+    <div id="preview-modal" class="modal">
+        <div class="modal-content preview-content">
+            <div class="modal-header">
+                <h3 id="preview-title">文件预览</h3>
+                <button class="close-btn" id="close-preview">&times;</button>
+            </div>
+            <div class="modal-body" id="preview-body">
+                <!-- 预览内容将在这里动态加载 -->
             </div>
         </div>
     </div>

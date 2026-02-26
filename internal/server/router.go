@@ -35,6 +35,7 @@ func SetupRouter(staticFS embed.FS, engine llm.Engine, kbase *kb.KnowledgeBase) 
 	{
 		api.GET("/conversations", s.ListConversations)
 		api.DELETE("/conversations/:id", s.DeleteConversation)
+		api.POST("/conversations/batch-delete", s.BatchDeleteConversations)
 		api.POST("/conversations", s.CreateConversation)
 		api.GET("/conversations/:id/messages", s.GetConversationMessages)
 		
@@ -67,6 +68,9 @@ func SetupRouter(staticFS embed.FS, engine llm.Engine, kbase *kb.KnowledgeBase) 
 		api.POST("/settings/select-folder", s.SelectKBFolder)
 
 		api.GET("/kb/files", s.ListKBFiles)
+		api.GET("/kb/download", s.DownloadKBFile)
+		api.DELETE("/kb/files/:id", s.DeleteKBFile)
+		api.POST("/kb/files/batch-delete", s.BatchDeleteKBFiles)
 		api.POST("/kb/sync", s.SyncKB)
 		api.POST("/kb/upload", s.UploadKBFile)
 		api.POST("/kb/reset", s.ResetKB)

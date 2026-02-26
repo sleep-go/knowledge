@@ -19,6 +19,8 @@ body, html {
     display: flex;
     flex-direction: column;
     border-right: 1px solid rgba(255,255,255,0.06);
+    position: relative;
+    overflow: hidden; /* Ensure batch actions don't overflow during transition */
 }
 
 .sidebar-header {
@@ -32,6 +34,58 @@ body, html {
 .sidebar-header-actions {
     display: flex;
     gap: 8px;
+}
+
+/* Batch Actions Bar */
+.batch-actions {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #0f172a;
+    border-top: 1px solid rgba(255,255,255,0.1);
+    padding: 16px;
+    display: flex;
+    gap: 8px;
+    transform: translateY(100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 10;
+    box-shadow: 0 -4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.batch-actions.active {
+    transform: translateY(0);
+}
+
+.batch-btn {
+    flex: 1;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.05);
+    color: #e2e8f0;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.batch-btn:hover {
+    background: rgba(255,255,255,0.1);
+}
+
+.batch-btn.delete {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #fca5a5;
+}
+
+.batch-btn.delete:hover {
+    background: rgba(239, 68, 68, 0.3);
+}
+
+.batch-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .sidebar-title {
@@ -49,9 +103,10 @@ body, html {
     border-radius: 10px;
     cursor: pointer;
     display: flex;
-    flex-direction: column;
+    align-items: center; /* Changed from default to center for checkbox alignment */
     gap: 4px;
     position: relative;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .conversation-item:hover {
@@ -62,12 +117,63 @@ body, html {
     background: rgba(255,255,255,0.10);
 }
 
+/* Content wrapper to handle slide effect */
+.conversation-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow: hidden;
+    transition: transform 0.3s ease;
+}
+
+.conversation-checkbox {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 0;
+    height: 18px;
+    border: 0;
+    border-radius: 4px;
+    margin-right: 0;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0;
+    transform: scale(0.8);
+}
+
+.sidebar.batch-mode .conversation-checkbox {
+    width: 18px;
+    border: 2px solid rgba(255,255,255,0.4);
+    margin-right: 10px;
+    opacity: 1;
+    transform: scale(1);
+}
+
+.conversation-checkbox:checked {
+    background-color: #3b82f6;
+    border-color: #3b82f6;
+}
+
+.conversation-checkbox:checked::after {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 1px;
+    width: 4px;
+    height: 10px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
 .conversation-item-title {
     font-size: 14px;
     color: #e2e8f0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    padding-right: 48px;
 }
 
 .conversation-item-meta {
@@ -91,6 +197,12 @@ body, html {
     color: #fecaca;
     font-size: 11px;
     cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.sidebar.batch-mode .conversation-delete-btn {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .conversation-delete-btn:hover {
@@ -136,7 +248,7 @@ body, html {
     white-space: nowrap;
 }
 
-#new-chat-btn, #settings-btn {
+#manage-chats-btn, #new-chat-btn, #settings-btn {
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: white;
@@ -649,4 +761,94 @@ footer {
         margin: 0;
         box-shadow: none;
     }
+}
+
+/* Think Block Styles */
+.think-block {
+    margin: 8px 0;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background-color: #f8fafc;
+    overflow: hidden;
+}
+
+.think-title {
+    padding: 8px 12px;
+    background-color: #f1f5f9;
+    color: #64748b;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+}
+
+.think-title::before {
+    content: "▼";
+    display: inline-block;
+    margin-right: 6px;
+    font-size: 10px;
+    transition: transform 0.2s;
+}
+
+.think-block.collapsed .think-title::before {
+    transform: rotate(-90deg);
+}
+
+.think-content {
+    padding: 12px;
+    border-top: 1px solid #e2e8f0;
+    font-size: 14px;
+    color: #475569;
+    background-color: #fff;
+}
+
+/* 预览模态框特定样式 */
+.preview-content {
+    width: 90%;
+    max-width: 900px;
+}
+
+#preview-body {
+    padding: 20px;
+    font-size: 14px;
+    line-height: 1.6;
+    background: #fff;
+}
+
+#preview-body img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+#preview-body pre {
+    margin: 0;
+    padding: 16px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+#preview-body code {
+    font-family: inherit;
+    color: #334155;
+}
+
+.preview-loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 200px;
+    color: #64748b;
+}
+
+.preview-error {
+    color: #ef4444;
+    text-align: center;
+    padding: 20px;
 }
