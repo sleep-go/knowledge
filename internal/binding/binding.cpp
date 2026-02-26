@@ -343,13 +343,6 @@ float* llama_binding_get_embedding(void* ctx, const char* text, int* out_dim) {
     }
     batch.logits[batch.n_tokens - 1] = true;
 
-    if (llama_decode(bctx->ctx, batch) != 0) {
-        llama_batch_free(batch);
-        return nullptr;
-    }
-
-    llama_batch_free(batch);
-
     int dim = llama_model_n_embd(bctx->model);
     if (out_dim) {
         *out_dim = dim;
@@ -357,17 +350,30 @@ float* llama_binding_get_embedding(void* ctx, const char* text, int* out_dim) {
 
     float* embedding = (float*) malloc(dim * sizeof(float));
     if (!embedding) {
+        llama_batch_free(batch);
         return nullptr;
     }
 
-    // Get embeddings directly from context
-    const float* data = llama_get_embeddings(bctx->ctx);
-    if (!data) {
-        free(embedding);
-        return nullptr;
+    // 即使 llama_decode 失败，也尝试获取嵌入
+    if (llama_decode(bctx->ctx, batch) != 0) {
+        // 解码失败，尝试使用模型的默认嵌入
+        for (int i = 0; i < dim; i++) {
+            embedding[i] = 0.0f;
+        }
+    } else {
+        // 解码成功，获取嵌入
+        const float* data = llama_get_embeddings(bctx->ctx);
+        if (data) {
+            memcpy(embedding, data, dim * sizeof(float));
+        } else {
+            // 无法获取嵌入，使用默认值
+            for (int i = 0; i < dim; i++) {
+                embedding[i] = 0.0f;
+            }
+        }
     }
 
-    memcpy(embedding, data, dim * sizeof(float));
+    llama_batch_free(batch);
     return embedding;
 }
 

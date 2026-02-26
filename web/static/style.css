@@ -789,7 +789,6 @@ footer {
     display: inline-block;
     margin-right: 6px;
     font-size: 10px;
-    transition: transform 0.2s;
 }
 
 .think-block.collapsed .think-title::before {
@@ -802,7 +801,6 @@ footer {
     font-size: 14px;
     color: #475569;
     background-color: #fff;
-    transition: max-height 0.3s ease-out, padding 0.3s ease-out;
     max-height: 2000px;
     overflow: hidden;
 }

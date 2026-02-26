@@ -72,7 +72,15 @@ func (kb *KnowledgeBase) ScanFolder() error {
 		return fmt.Errorf("knowledge base folder not set")
 	}
 
-	return filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+	// 收集所有文件信息
+	var files []struct {
+		path     string
+		info     os.FileInfo
+		checksum string
+	}
+
+	// 第一遍：收集文件信息
+	err = filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -91,10 +99,28 @@ func (kb *KnowledgeBase) ScanFolder() error {
 			return err
 		}
 
-		// 存入数据库
-		_, err = db.SaveKBFile(path, info.Size(), checksum)
-		return err
+		files = append(files, struct {
+			path     string
+			info     os.FileInfo
+			checksum string
+		}{path, info, checksum})
+
+		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	// 第二遍：批量处理数据库操作
+	for _, file := range files {
+		_, err = db.SaveKBFile(file.path, file.info.Size(), file.checksum)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // ProcessFiles 处理待处理的文件
@@ -104,19 +130,58 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 		return err
 	}
 
+	// 过滤出待处理的文件
+	var pendingFiles []db.KnowledgeBaseFile
 	for _, f := range files {
-		if f.Status != "pending" {
-			continue
+		if f.Status == "pending" {
+			pendingFiles = append(pendingFiles, f)
 		}
-
-		if err := kb.processFile(f); err != nil {
-			fmt.Printf("Error processing file %s: %v\n", f.Path, err)
-			_ = db.UpdateKBFileStatus(f.ID, "error")
-			continue
-		}
-
-		_ = db.UpdateKBFileStatus(f.ID, "processed")
 	}
+
+	if len(pendingFiles) == 0 {
+		return nil
+	}
+
+	// 并发处理文件
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(pendingFiles))
+
+	// 控制并发数量
+	concurrencyLimit := 5
+	semaphore := make(chan struct{}, concurrencyLimit)
+
+	for _, f := range pendingFiles {
+		wg.Add(1)
+		go func(file db.KnowledgeBaseFile) {
+			defer wg.Done()
+
+			// 申请信号量
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			if err := kb.processFile(file); err != nil {
+				fmt.Printf("Error processing file %s: %v\n", file.Path, err)
+				_ = db.UpdateKBFileStatus(file.ID, "error")
+				errChan <- err
+				return
+			}
+
+			_ = db.UpdateKBFileStatus(file.ID, "processed")
+		}(f)
+	}
+
+	// 等待所有处理完成
+	wg.Wait()
+	close(errChan)
+
+	// 检查是否有错误
+	for err := range errChan {
+		if err != nil {
+			// 只返回第一个错误
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -227,20 +292,59 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 
 	// 简单切片：按行或者按固定长度
 	chunks := splitText(content, 500, 100) // 每 500 字一个切片，100 字重叠，减少分片大小以适应上下文限制
+
+	// 过滤空切片
+	var validChunks []string
 	for _, chunk := range chunks {
-		if strings.TrimSpace(chunk) == "" {
-			continue
+		if strings.TrimSpace(chunk) != "" {
+			validChunks = append(validChunks, chunk)
 		}
+	}
 
-		// 生成向量
-		vector, err := getEmbedding(chunk)
+	if len(validChunks) == 0 {
+		return nil
+	}
+
+	// 并发处理切片的向量生成和存储
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(validChunks))
+
+	// 控制并发数量
+	chunkConcurrencyLimit := 10
+	chunkSemaphore := make(chan struct{}, chunkConcurrencyLimit)
+
+	for _, chunk := range validChunks {
+		wg.Add(1)
+		go func(chunkContent string) {
+			defer wg.Done()
+
+			// 申请信号量
+			chunkSemaphore <- struct{}{}
+			defer func() { <-chunkSemaphore }()
+
+			// 生成向量
+			vector, err := getEmbedding(chunkContent)
+			if err != nil {
+				// 如果生成向量失败，继续处理，不返回错误
+				fmt.Printf("Error getting embedding: %v\n", err)
+				vector = nil
+			}
+
+			if err := db.SaveKBChunk(f.ID, chunkContent, vector); err != nil {
+				errChan <- err
+				return
+			}
+		}(chunk)
+	}
+
+	// 等待所有处理完成
+	wg.Wait()
+	close(errChan)
+
+	// 检查是否有错误
+	for err := range errChan {
 		if err != nil {
-			// 如果生成向量失败，继续处理，不返回错误
-			fmt.Printf("Error getting embedding: %v\n", err)
-			vector = nil
-		}
-
-		if err := db.SaveKBChunk(f.ID, chunk, vector); err != nil {
+			// 只返回第一个错误
 			return err
 		}
 	}

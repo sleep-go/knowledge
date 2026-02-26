@@ -238,20 +238,41 @@ func ListKBFiles() ([]KnowledgeBaseFile, error) {
 
 func SaveKBFile(path string, size int64, checksum string) (*KnowledgeBaseFile, error) {
 	var f KnowledgeBaseFile
+
+	// 先尝试查找记录
 	err := DB.Where("path = ?", path).First(&f).Error
+
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			f = KnowledgeBaseFile{Path: path, Size: size, Checksum: checksum, Status: "pending"}
+		if err == gorm.ErrRecordNotFound {
+			// 记录不存在，创建新记录
+			f = KnowledgeBaseFile{
+				Path:     path,
+				Size:     size,
+				Checksum: checksum,
+				Status:   "pending",
+			}
 			err = DB.Create(&f).Error
-			return &f, err
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			// 其他错误
+			return nil, err
 		}
-		return nil, err
+	} else {
+		// 记录存在，检查是否需要更新
+		if f.Size != size || f.Checksum != checksum {
+			f.Size = size
+			f.Checksum = checksum
+			f.Status = "pending"
+			err = DB.Save(&f).Error
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
-	f.Size = size
-	f.Checksum = checksum
-	f.Status = "pending"
-	err = DB.Save(&f).Error
-	return &f, err
+
+	return &f, nil
 }
 
 func SaveKBChunk(fileID uint, content string, vector []byte) error {
