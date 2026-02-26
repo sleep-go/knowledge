@@ -26,6 +26,42 @@ func NewKnowledgeBase() *KnowledgeBase {
 	return &KnowledgeBase{}
 }
 
+// AddFile 添加单个文件到知识库并立即处理
+func (kb *KnowledgeBase) AddFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory")
+	}
+
+	// 只处理文本相关文件
+	ext := strings.ToLower(filepath.Ext(path))
+	if !isSupportedExt(ext) {
+		return fmt.Errorf("unsupported file extension: %s", ext)
+	}
+
+	checksum, err := calculateMD5(path)
+	if err != nil {
+		return err
+	}
+
+	// 存入数据库
+	kbFile, err := db.SaveKBFile(path, info.Size(), checksum)
+	if err != nil {
+		return err
+	}
+
+	// 立即处理文件
+	if err := kb.processFile(*kbFile); err != nil {
+		_ = db.UpdateKBFileStatus(kbFile.ID, "error")
+		return err
+	}
+
+	return db.UpdateKBFileStatus(kbFile.ID, "processed")
+}
+
 // ScanFolder 扫描文件夹并同步到数据库
 func (kb *KnowledgeBase) ScanFolder() error {
 	folder, err := db.GetKBFolder()
@@ -112,7 +148,7 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	}
 
 	// 简单切片：按行或者按固定长度
-	chunks := splitText(content, 500) // 每 500 字一个切片
+	chunks := splitText(content, 500, 100) // 每 500 字一个切片，100 字重叠，减少分片大小以适应上下文限制
 	for _, chunk := range chunks {
 		if strings.TrimSpace(chunk) == "" {
 			continue
@@ -199,12 +235,36 @@ func calculateMD5(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func splitText(text string, chunkSize int) []string {
+func splitText(text string, chunkSize int, overlap int) []string {
+	if chunkSize <= 0 {
+		return []string{text}
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+	if overlap >= chunkSize {
+		overlap = chunkSize - 1
+	}
+
 	var chunks []string
 	runes := []rune(text)
-	for i := 0; i < len(runes); i += chunkSize {
-		end := min(i+chunkSize, len(runes))
+	n := len(runes)
+
+	if n == 0 {
+		return chunks
+	}
+
+	step := chunkSize - overlap
+	if step <= 0 {
+		step = 1
+	}
+
+	for i := 0; i < n; i += step {
+		end := min(i+chunkSize, n)
 		chunks = append(chunks, string(runes[i:end]))
+		if end == n {
+			break
+		}
 	}
 	return chunks
 }

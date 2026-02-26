@@ -9,6 +9,9 @@ type Engine interface {
 	Init(modelPath string) error
 	Chat(history []ChatMessage) (string, error)
 	ChatStream(history []ChatMessage, onToken func(token string) bool) error
+	SwitchModel(modelPath string) error
+	ListModels() ([]string, error)
+	GetModelPath() string
 }
 
 type ChatOptions struct {

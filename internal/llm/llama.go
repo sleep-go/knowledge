@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -51,7 +52,10 @@ func (l *LlamaEngine) Init(modelPath string) error {
 	l.modelPath = modelPath
 
 	var err error
-	l.model, err = binding.NewLlama(modelPath, 2048, 4, 0)
+	// 初始化模型时，设置较大的上下文窗口大小，以适应多轮对话和知识库内容
+	// 4096 是大多数现代 Llama 模型的默认上下文窗口大小
+	// 如果需要支持更长的上下文，可以进一步增加这个值
+	l.model, err = binding.NewLlama(modelPath, 4096, 4, 0)
 	if err != nil {
 		return err
 	}
@@ -95,7 +99,12 @@ func (l *LlamaEngine) ChatStream(history []ChatMessage, onToken func(token strin
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	return l.model.ChatStream(string(b), nil, 512, 0.7, 0.95, 40, 1.1, func(piece string) bool {
+	// 增加 MaxTokens 限制到 2048，进一步防止输出被截断
+	// 如果需要支持更长的回复，可以继续增加此值，但要注意不要超过总上下文窗口大小
+	maxTokens := 2048
+	fmt.Printf("[LlamaEngine] Starting stream with MaxTokens: %d\n", maxTokens)
+	
+	return l.model.ChatStream(string(b), nil, maxTokens, 0.7, 0.95, 40, 1.1, func(piece string) bool {
 		if piece == "" {
 			return true
 		}
@@ -172,6 +181,63 @@ func (l *LlamaEngine) Close() {
 	if l.model != nil {
 		l.model.Close()
 	}
+}
+
+// SwitchModel 切换模型
+func (l *LlamaEngine) SwitchModel(modelPath string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// 检查文件是否存在
+	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+		return fmt.Errorf("model not found at %s", modelPath)
+	}
+
+	// 关闭当前模型
+	if l.model != nil {
+		l.model.Close()
+		l.model = nil
+	}
+
+	var err error
+	// 使用与 Init 相同的参数重新加载模型
+	l.model, err = binding.NewLlama(modelPath, 4096, 4, 0)
+	if err != nil {
+		return fmt.Errorf("failed to load model %s: %v", modelPath, err)
+	}
+
+	l.modelPath = modelPath
+	fmt.Printf("[LlamaEngine] Switched to model: %s\n", modelPath)
+	return nil
+}
+
+// ListModels 列出可用模型
+func (l *LlamaEngine) ListModels() ([]string, error) {
+	// 确定搜索目录：优先使用当前模型所在目录，默认为 "models"
+	dir := "models"
+	if l.modelPath != "" {
+		dir = filepath.Dir(l.modelPath)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// 如果目录不存在，返回空列表而不是错误，或者视情况而定
+		// 这里返回错误以便调试
+		return nil, fmt.Errorf("failed to list models in %s: %v", dir, err)
+	}
+
+	var models []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".gguf") {
+			models = append(models, entry.Name())
+		}
+	}
+	return models, nil
+}
+
+// GetModelPath 获取当前模型路径
+func (l *LlamaEngine) GetModelPath() string {
+	return l.modelPath
 }
 
 func NewEngine() Engine {

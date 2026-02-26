@@ -13,9 +13,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectKBFolder = document.getElementById('select-kb-folder');
     const kbFolderInput = document.getElementById('kb-folder-input');
     const syncKBBtn = document.getElementById('sync-kb-btn');
+    const resetKBBtn = document.getElementById('reset-kb-btn');
     const syncStatus = document.getElementById('sync-status');
     const kbFileList = document.getElementById('kb-file-list');
     const currentConversationTitle = document.getElementById('current-conversation-title');
+    const uploadKBBtn = document.getElementById('upload-kb-btn');
+    const kbFileUpload = document.getElementById('kb-file-upload');
+    const chatFileInput = document.getElementById('chat-file-input');
+    const attachBtn = document.getElementById('attach-btn');
+    const filePreviewContainer = document.getElementById('file-preview-container');
+    
+    const LOADING_HTML = '<div class="loading-dots"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>';
 
     let currentConversationId = null;
     let conversations = [];
@@ -50,22 +58,66 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderMarkdown(text) {
-        const parts = String(text || '').split('```');
+        if (!text) return '';
+        
+        // 匹配代码块、think 块、document 块
+        // 支持未闭合的标签以实现渐进式渲染
+        const regex = /(```[\s\S]*?(?:```|$)|<think>[\s\S]*?(?:<\/think>|$)|<document\s+index="\d+">[\s\S]*?<\/document>)/gi;
+        const parts = String(text).split(regex);
         let html = '';
-        for (let i = 0; i < parts.length; i++) {
-            if (i % 2 === 1) {
-                const block = parts[i];
+        
+        for (const part of parts) {
+            if (!part) continue;
+            
+            // 处理代码块
+            if (part.startsWith('```')) {
+                let block = part.substring(3);
+                if (block.endsWith('```')) {
+                    block = block.substring(0, block.length - 3);
+                }
+                
                 const lines = block.split('\n');
                 const first = lines[0].trim();
                 const rest = lines.slice(1).join('\n').trimEnd();
+                
                 const lang = first || '';
                 const langAttr = lang ? ` class="language-${lang}" data-lang="${escapeHtml(lang)}"` : '';
                 const label = lang || '代码';
                 html += `<div class="code-block"><div class="code-block-header"><span class="code-lang">${escapeHtml(label)}</span><button class="copy-btn" type="button">复制</button></div><pre><code${langAttr}>${escapeHtml(rest)}</code></pre></div>`;
                 continue;
             }
-
-            const lines = parts[i].split('\n');
+            
+            // 处理 <think> 块
+            if (/^<think>/i.test(part)) {
+                let content = part.replace(/^<think>/i, '');
+                let isClosed = false;
+                if (/<\/think>$/i.test(content)) {
+                    content = content.replace(/<\/think>$/i, '');
+                    isClosed = true;
+                }
+                
+                // 默认添加 collapsed 类
+                // 如果未闭合，在内容末尾添加 loading 动画
+                let innerHtml = renderMarkdown(content);
+                if (!isClosed) {
+                    innerHtml += '<div class="loading-dots"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div>';
+                }
+                
+                html += `<div class="think-block collapsed"><div class="think-title">思考过程</div><div class="think-content">${innerHtml}</div></div>`;
+                continue;
+            }
+            
+            // 处理 <document> 块
+            const docMatch = /^<document\s+index="(\d+)">/i.exec(part);
+            if (docMatch) {
+                const index = docMatch[1];
+                const content = part.replace(/^<document\s+index="\d+">/i, '').replace(/<\/document>$/i, '');
+                html += `<div class="document-block"><div class="document-title">文档引用 #${index}</div><div class="document-content">${renderMarkdown(content)}</div></div>`;
+                continue;
+            }
+            
+            // 普通 Markdown 处理 (列表、段落)
+            const lines = part.split('\n');
             let inList = false;
             for (const rawLine of lines) {
                 const line = rawLine.replace(/\r/g, '');
@@ -82,7 +134,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         inList = false;
                     }
                     if (line.trim() === '') {
-                        html += '<br />';
+                        // 空行忽略
                     } else {
                         html += `<p>${renderInlineMarkdown(line)}</p>`;
                     }
@@ -91,6 +143,26 @@ document.addEventListener('DOMContentLoaded', () => {
             if (inList) html += '</ul>';
         }
         return html;
+    }
+
+    function updateMessageContent(element, markdown) {
+        // 1. Capture state of existing think blocks
+        const existingThinkBlocks = element.querySelectorAll('.think-block');
+        const states = Array.from(existingThinkBlocks).map(block => !block.classList.contains('collapsed'));
+        
+        // 2. Render new HTML
+        const newHtml = renderMarkdown(markdown);
+        
+        // 3. Apply
+        element.innerHTML = newHtml;
+        
+        // 4. Restore state
+        const newThinkBlocks = element.querySelectorAll('.think-block');
+        newThinkBlocks.forEach((block, index) => {
+            if (states[index]) { // if it was expanded
+                block.classList.remove('collapsed');
+            }
+        });
     }
 
     function appendMessage(role, content) {
@@ -311,6 +383,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function retryStream() {
         if (!currentConversationId) return;
         const assistantDiv = appendMessage('assistant', '');
+        assistantDiv.innerHTML = LOADING_HTML;
         sendBtn.disabled = true;
 
         try {
@@ -332,11 +405,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const chunk = decoder.decode(value, { stream: true });
                 if (chunk) {
                     raw += chunk;
-                    assistantDiv.textContent = raw;
+                    updateMessageContent(assistantDiv, raw);
                     chatContainer.scrollTop = chatContainer.scrollHeight;
                 }
             }
-            assistantDiv.innerHTML = renderMarkdown(raw);
+            // 流结束后，最后一次性渲染 Markdown
+            updateMessageContent(assistantDiv, raw);
             await refreshConversations();
         } catch (error) {
             console.error('Error:', error);
@@ -380,15 +454,123 @@ document.addEventListener('DOMContentLoaded', () => {
         await switchConversation(conv.ID);
     }
 
+    // Chat File Upload Logic
+    attachBtn.addEventListener('click', () => {
+        chatFileInput.click();
+    });
+
+    chatFileInput.addEventListener('change', () => {
+        const file = chatFileInput.files[0];
+        filePreviewContainer.innerHTML = '';
+        if (!file) {
+            filePreviewContainer.style.display = 'none';
+            return;
+        }
+        
+        filePreviewContainer.style.display = 'flex';
+        const item = document.createElement('div');
+        item.className = 'file-preview-item';
+        item.innerHTML = `
+            <span>${file.name}</span>
+            <button type="button" class="file-remove-btn" title="移除">&times;</button>
+        `;
+        
+        item.querySelector('.file-remove-btn').addEventListener('click', () => {
+            chatFileInput.value = '';
+            filePreviewContainer.innerHTML = '';
+            filePreviewContainer.style.display = 'none';
+        });
+        
+        filePreviewContainer.appendChild(item);
+    });
+
     async function sendMessage() {
-        const message = messageInput.value.trim();
-        if (!message) return;
-        if (!currentConversationId) return;
+        let message = messageInput.value.trim();
+        const file = chatFileInput.files[0];
+        
+        if (!message && !file) return;
+        
+        sendBtn.disabled = true;
+        attachBtn.disabled = true;
+
+        // 1. Handle File Upload
+        if (file) {
+            const previewItem = filePreviewContainer.querySelector('.file-preview-item');
+            if (previewItem) {
+                previewItem.innerHTML = `<span>正在上传 ${file.name}...</span>`;
+            }
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                const res = await fetch('/api/kb/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!res.ok) {
+                    const t = await res.text();
+                    throw new Error(t);
+                }
+                
+                // Clear file input
+                chatFileInput.value = '';
+                filePreviewContainer.innerHTML = '';
+                filePreviewContainer.style.display = 'none';
+                
+                // Append file info
+                if (!message) {
+                    message = `请分析上传的文件: ${file.name}`;
+                } else {
+                    message += `\n\n[已上传文件: ${file.name}]`;
+                }
+            } catch (err) {
+                console.error(err);
+                alert('文件上传失败: ' + err.message);
+                sendBtn.disabled = false;
+                attachBtn.disabled = false;
+                // Restore preview
+                if (previewItem) {
+                     previewItem.innerHTML = `
+                        <span>${file.name} (上传失败)</span>
+                        <button type="button" class="file-remove-btn" title="移除">&times;</button>
+                    `;
+                    previewItem.querySelector('.file-remove-btn').addEventListener('click', () => {
+                        chatFileInput.value = '';
+                        filePreviewContainer.innerHTML = '';
+                        filePreviewContainer.style.display = 'none';
+                    });
+                }
+                return;
+            }
+        }
+        
+        // 2. Auto-create conversation if needed
+        if (!currentConversationId) {
+            try {
+                await createConversation();
+                if (!currentConversationId) {
+                    alert('无法创建新会话');
+                    sendBtn.disabled = false;
+                    attachBtn.disabled = false;
+                    return;
+                }
+            } catch (err) {
+                console.error('Auto-create conversation failed:', err);
+                alert('自动创建会话失败');
+                sendBtn.disabled = false;
+                attachBtn.disabled = false;
+                return;
+            }
+        }
 
         appendMessage('user', message);
         const assistantDiv = appendMessage('assistant', '');
+        assistantDiv.innerHTML = LOADING_HTML;
         messageInput.value = '';
-        sendBtn.disabled = true;
+        
+        // Adjust scroll immediately
+        chatContainer.scrollTop = chatContainer.scrollHeight;
 
         try {
             const response = await fetch(`/api/conversations/${currentConversationId}/chat/stream`, {
@@ -413,17 +595,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const chunk = decoder.decode(value, { stream: true });
                 if (chunk) {
                     raw += chunk;
-                    assistantDiv.textContent = raw;
+                    updateMessageContent(assistantDiv, raw);
                     chatContainer.scrollTop = chatContainer.scrollHeight;
                 }
             }
-            assistantDiv.innerHTML = renderMarkdown(raw);
+            // 流结束后，最后一次性渲染 Markdown
+            updateMessageContent(assistantDiv, raw);
             await refreshConversations();
         } catch (error) {
             console.error('Error:', error);
             assistantDiv.textContent = 'Error: ' + error.message;
         } finally {
             sendBtn.disabled = false;
+            attachBtn.disabled = false;
             messageInput.focus();
         }
     }
@@ -438,6 +622,16 @@ document.addEventListener('DOMContentLoaded', () => {
     chatContainer.addEventListener('click', async (e) => {
         const el = e.target;
         if (!(el instanceof HTMLElement)) return;
+
+        // 处理 think-title 点击
+        if (el.classList.contains('think-title')) {
+            const block = el.closest('.think-block');
+            if (block) {
+                block.classList.toggle('collapsed');
+            }
+            return;
+        }
+
         if (!el.classList.contains('copy-btn')) return;
         const wrapper = el.closest('.code-block');
         if (!wrapper) return;
@@ -525,6 +719,7 @@ document.addEventListener('DOMContentLoaded', () => {
     syncKBBtn.addEventListener('click', async () => {
         syncStatus.textContent = '正在同步...';
         syncKBBtn.disabled = true;
+        resetKBBtn.disabled = true;
         try {
             const res = await fetch('/api/kb/sync', { method: 'POST' });
             if (res.ok) {
@@ -536,16 +731,81 @@ document.addEventListener('DOMContentLoaded', () => {
                         clearInterval(timer);
                         syncStatus.textContent = '同步完成';
                         syncKBBtn.disabled = false;
+                        resetKBBtn.disabled = false;
                     }
                 }, 2000);
             } else {
                 syncStatus.textContent = '同步失败';
                 syncKBBtn.disabled = false;
+                resetKBBtn.disabled = false;
             }
         } catch (err) {
             console.error('Failed to sync KB:', err);
             syncStatus.textContent = '同步出错';
             syncKBBtn.disabled = false;
+            resetKBBtn.disabled = false;
+        }
+    });
+
+    resetKBBtn.addEventListener('click', async () => {
+        if (!confirm('确定要清空所有已导入的知识库文件吗？此操作不可恢复。')) {
+            return;
+        }
+        
+        syncStatus.textContent = '正在重置...';
+        syncKBBtn.disabled = true;
+        resetKBBtn.disabled = true;
+        
+        try {
+            const res = await fetch('/api/kb/reset', { method: 'POST' });
+            if (res.ok) {
+                syncStatus.textContent = '知识库已清空';
+                await loadKBFiles(); // 刷新列表，应该变空
+            } else {
+                const data = await res.json();
+                syncStatus.textContent = '重置失败: ' + (data.error || '未知错误');
+            }
+        } catch (err) {
+            console.error('Failed to reset KB:', err);
+            syncStatus.textContent = '重置出错';
+        } finally {
+            syncKBBtn.disabled = false;
+            resetKBBtn.disabled = false;
+        }
+    });
+
+    uploadKBBtn.addEventListener('click', async () => {
+        const file = kbFileUpload.files[0];
+        if (!file) {
+            alert('请先选择文件');
+            return;
+        }
+        
+        uploadKBBtn.disabled = true;
+        uploadKBBtn.textContent = '上传中...';
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const res = await fetch('/api/kb/upload', {
+                method: 'POST',
+                body: formData
+            });
+            if (res.ok) {
+                alert('上传成功并已开始处理');
+                kbFileUpload.value = ''; // clear input
+                await loadKBFiles();
+            } else {
+                const t = await res.text();
+                alert('上传失败: ' + t);
+            }
+        } catch (err) {
+            console.error('Upload failed:', err);
+            alert('上传出错');
+        } finally {
+            uploadKBBtn.disabled = false;
+            uploadKBBtn.textContent = '上传';
         }
     });
 

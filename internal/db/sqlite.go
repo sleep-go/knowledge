@@ -236,6 +236,18 @@ func SaveKBFile(path string, size int64, checksum string) (*KnowledgeBaseFile, e
 			err = DB.Create(&f).Error
 			return &f, err
 		}
+		// 如果记录已存在但之前被软删除了，或者处于某种异常状态
+		// 我们尝试通过 Unscoped 查找并更新它
+		var existing KnowledgeBaseFile
+		if err2 := DB.Unscoped().Where("path = ?", path).First(&existing).Error; err2 == nil {
+			// 找到了（可能是软删除的）记录，更新它并恢复
+			existing.Size = size
+			existing.Checksum = checksum
+			existing.Status = "pending"
+			existing.DeletedAt = gorm.DeletedAt{} // 清除删除标记
+			err = DB.Unscoped().Save(&existing).Error
+			return &existing, err
+		}
 		return nil, err
 	}
 	f.Size = size
@@ -250,7 +262,7 @@ func SaveKBChunk(fileID uint, content string) error {
 }
 
 func DeleteKBChunks(fileID uint) error {
-	return DB.Where("file_id = ?", fileID).Delete(&KnowledgeBaseChunk{}).Error
+	return DB.Unscoped().Where("file_id = ?", fileID).Delete(&KnowledgeBaseChunk{}).Error
 }
 
 func UpdateKBFileStatus(fileID uint, status string) error {
@@ -309,6 +321,18 @@ func DeleteConversation(conversationID uint) error {
 		return err
 	}
 	if err := DB.Delete(&Conversation{}, conversationID).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func ResetKnowledgeBase() error {
+	// 删除所有的知识库分片
+	if err := DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&KnowledgeBaseChunk{}).Error; err != nil {
+		return err
+	}
+	// 删除所有的知识库文件记录
+	if err := DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&KnowledgeBaseFile{}).Error; err != nil {
 		return err
 	}
 	return nil

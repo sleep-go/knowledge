@@ -21,10 +21,10 @@
   - [x] SubTask 4.2: 会话列表实时刷新标题与更新时间
   - [x] SubTask 4.3: 标题生成触发时机与幂等处理
 
-- [ ] Task 5: 验证与回归
-  - [ ] SubTask 5.1: 手工验证：切换/新建会话、流式输出、Markdown 渲染
-  - [ ] SubTask 5.2: 手工验证：编辑/重试行为符合 Spec
-  - [ ] SubTask 5.3: 兼容性验证：旧接口与旧页面不崩溃
+- [x] Task 5: 验证与回归
+  - [x] SubTask 5.1: 手工验证：切换/新建会话、流式输出、Markdown 渲染
+  - [x] SubTask 5.2: 手工验证：编辑/重试行为符合 Spec
+  - [x] SubTask 5.3: 兼容性验证：旧接口与旧页面不崩溃
 
 # Task Dependencies
 - Task 1 依赖现有会话 API（已存在），可直接开始

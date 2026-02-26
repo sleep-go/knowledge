@@ -1,0 +1,7 @@
+- [x] Chat input area has a file attachment button.
+- [x] Clicking the button opens a file picker.
+- [x] Selected file name is shown in a preview area.
+- [x] User can remove the selected file before sending.
+- [x] Sending a message with a file selected uploads the file first.
+- [x] File upload failure prevents message sending and shows an error.
+- [x] File upload success is indicated (e.g., via a system message or notification).
