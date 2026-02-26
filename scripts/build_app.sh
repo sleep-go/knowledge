@@ -52,6 +52,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
 EOF
@@ -60,10 +62,11 @@ EOF
 echo "Copying binary..."
 cp "$OUTPUT_DIR/$BINARY_NAME" "$APP_DIR/Contents/MacOS/$BINARY_NAME"
 
-# 5. Copy resources (models and data)
+# 5. Copy resources (models, data, and web files)
 echo "Copying resources..."
 mkdir -p "$APP_DIR/Contents/Resources/models"
 mkdir -p "$APP_DIR/Contents/Resources/data"
+mkdir -p "$APP_DIR/Contents/Resources/web/static"
 
 if [ -d "models" ]; then
     cp -r models/* "$APP_DIR/Contents/Resources/models/"
@@ -72,12 +75,27 @@ else
     echo "Warning: models directory not found"
 fi
 
-if [ -d "data" ]; then
-    cp -r data/* "$APP_DIR/Contents/Resources/data/"
-    echo "Copied data"
+# Create empty data directory structure
+mkdir -p "$APP_DIR/Contents/Resources/data"
+
+# Create a new empty database file with only table structure
+# The database will be initialized with table structure when the app starts
+touch "$APP_DIR/Contents/Resources/data/knowledge.db"
+echo "Created empty database file"
+
+
+# Copy web files
+if [ -d "web" ]; then
+    if [ -f "web/index.html" ]; then
+        cp web/index.html "$APP_DIR/Contents/Resources/web/"
+        echo "Copied index.html"
+    fi
+    if [ -d "web/static" ]; then
+        cp -r web/static/* "$APP_DIR/Contents/Resources/web/static/"
+        echo "Copied static files"
+    fi
 else
-    # Create empty db if data dir doesn't exist
-    touch "$APP_DIR/Contents/Resources/data/.keep"
+    echo "Warning: web directory not found"
 fi
 
 # 6. Make the binary executable

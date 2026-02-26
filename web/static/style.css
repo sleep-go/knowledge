@@ -804,6 +804,56 @@ footer {
     background-color: #fff;
 }
 
+/* Document Block Styles */
+.document-block {
+    margin: 8px 0;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background-color: #f8fafc;
+    overflow: hidden;
+}
+
+.document-title {
+    padding: 8px 12px;
+    background-color: #f1f5f9;
+    color: #64748b;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.document-content {
+    padding: 12px;
+    border-top: 1px solid #e2e8f0;
+    font-size: 14px;
+    color: #475569;
+    background-color: #fff;
+}
+
+/* Knowledge Base Block Styles */
+.knowledge-base-block {
+    margin: 8px 0;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background-color: #f8fafc;
+    overflow: hidden;
+}
+
+.knowledge-base-title {
+    padding: 8px 12px;
+    background-color: #f1f5f9;
+    color: #64748b;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.knowledge-base-content {
+    padding: 12px;
+    border-top: 1px solid #e2e8f0;
+    font-size: 14px;
+    color: #475569;
+    background-color: #fff;
+}
+
 /* 预览模态框特定样式 */
 .preview-content {
     width: 90%;

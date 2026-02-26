@@ -80,9 +80,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderMarkdown(text) {
         if (!text) return '';
         
-        // 匹配代码块、think 块、document 块
+        // 匹配代码块、think 块、document 块、knowledge_base 块
         // 支持未闭合的标签以实现渐进式渲染
-        const regex = /(```[\s\S]*?(?:```|$)|<think>[\s\S]*?(?:<\/think>|$)|<document\s+index="\d+">[\s\S]*?<\/document>)/gi;
+        const regex = /(```[\s\S]*?(?:```|$)|<think>[\s\S]*?(?:<\/think>|$)|<document\s+index="\d+">[\s\S]*?<\/document>|<knowledge_base>[\s\S]*?(?:<\/knowledge_base>|$))/gi;
         const parts = String(text).split(regex);
         let html = '';
         
@@ -133,6 +133,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 const index = docMatch[1];
                 const content = part.replace(/^<document\s+index="\d+">/i, '').replace(/<\/document>$/i, '');
                 html += `<div class="document-block"><div class="document-title">文档引用 #${index}</div><div class="document-content">${renderMarkdown(content)}</div></div>`;
+                continue;
+            }
+            
+            // 处理 <knowledge_base> 块
+            if (/^<knowledge_base>/i.test(part)) {
+                const content = part.replace(/^<knowledge_base>/i, '').replace(/<\/knowledge_base>$/i, '');
+                html += `<div class="knowledge-base-block"><div class="knowledge-base-title">知识库引用</div><div class="knowledge-base-content">${renderMarkdown(content)}</div></div>`;
                 continue;
             }
             
@@ -789,9 +796,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // 设置相关逻辑
+    // System prompt elements
+    const systemPromptInput = document.getElementById('system-prompt-input');
+    const saveSystemPromptBtn = document.getElementById('save-system-prompt');
+
     settingsBtn.addEventListener('click', () => {
         settingsModal.style.display = 'block';
         loadSettings();
+        loadSystemPrompt();
         loadKBFiles();
         loadModels();
     });
@@ -817,6 +829,37 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Failed to load settings:', err);
         }
     }
+
+    async function loadSystemPrompt() {
+        try {
+            const res = await fetch('/api/settings/system-prompt');
+            const data = await res.json();
+            if (data.prompt) {
+                systemPromptInput.value = data.prompt;
+            }
+        } catch (err) {
+            console.error('Failed to load system prompt:', err);
+        }
+    }
+
+    saveSystemPromptBtn.addEventListener('click', async () => {
+        const prompt = systemPromptInput.value.trim();
+        try {
+            const res = await fetch('/api/settings/system-prompt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: prompt })
+            });
+            if (res.ok) {
+                alert('保存成功');
+            } else {
+                alert('保存失败');
+            }
+        } catch (err) {
+            console.error('Failed to save system prompt:', err);
+            alert('保存出错');
+        }
+    });
 
     async function loadModels() {
         try {

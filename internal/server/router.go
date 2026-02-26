@@ -66,6 +66,8 @@ func SetupRouter(staticFS embed.FS, engine llm.Engine, kbase *kb.KnowledgeBase) 
 		api.GET("/settings/kb-folder", s.GetKBFolder)
 		api.POST("/settings/kb-folder", s.UpdateKBFolder)
 		api.POST("/settings/select-folder", s.SelectKBFolder)
+		api.GET("/settings/system-prompt", s.GetSystemPrompt)
+		api.POST("/settings/system-prompt", s.UpdateSystemPrompt)
 
 		api.GET("/kb/files", s.ListKBFiles)
 		api.GET("/kb/download", s.DownloadKBFile)

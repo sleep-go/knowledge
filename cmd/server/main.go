@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
-	"time"
 
 	"knowledge/internal/db"
 	"knowledge/internal/kb"
@@ -26,7 +25,7 @@ func main() {
 		log.Fatal("Failed to get executable path:", err)
 	}
 	exeDir := filepath.Dir(exePath)
-	
+
 	// Helper to resolve paths relative to executable if they are not absolute
 	// In macOS .app bundle, resources are usually in ../Resources relative to the binary in Contents/MacOS
 	// But standard structure is:
@@ -37,7 +36,7 @@ func main() {
 		if filepath.IsAbs(p) {
 			return p
 		}
-		
+
 		// 1. Check relative to CWD (development mode)
 		if _, err := os.Stat(p); err == nil {
 			return p
@@ -82,7 +81,7 @@ func main() {
 		// If resolved path is still the relative one (not found), make it relative to exeDir or Resources?
 		// If it's "data/knowledge.db" and not found, resolvePath returned "data/knowledge.db".
 		// We should probably default to creating it next to binary or in Resources if packaged.
-		
+
 		// Let's refine logic: if resolvePath returned relative path, it means it wasn't found.
 		// We should construct an absolute path for creation.
 		if !filepath.IsAbs(finalDbPath) {
@@ -102,14 +101,14 @@ func main() {
 	// Find the model file
 	if _, err := os.Stat(finalModelPath); os.IsNotExist(err) {
 		// If default or specified path doesn't exist, try to find any .gguf in models/ relative to likely locations
-		
+
 		// Search locations
 		searchDirs := []string{
 			"models",
 			filepath.Join(exeDir, "models"),
 			filepath.Join(exeDir, "..", "Resources", "models"),
 		}
-		
+
 		found := false
 		for _, dir := range searchDirs {
 			pattern := filepath.Join(dir, "*.gguf")
@@ -121,7 +120,7 @@ func main() {
 				break
 			}
 		}
-		
+
 		if !found {
 			fmt.Printf("Warning: Model not found at %s and no .gguf files found in search paths.\n", finalModelPath)
 		}
@@ -163,7 +162,8 @@ func main() {
 
 	// Open Browser automatically
 	go func() {
-		time.Sleep(2 * time.Second) // Wait for server to start
+		// 立即打开浏览器，不等待服务器启动
+		// 这样可以避免因为服务器启动缓慢而导致浏览器无法打开
 		url := fmt.Sprintf("http://localhost:%s", *port)
 		openBrowser(url)
 	}()

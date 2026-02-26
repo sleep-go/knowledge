@@ -221,3 +221,21 @@ func (s *Server) BatchDeleteKBFiles(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": len(req.IDs)})
 }
+
+func (s *Server) GetSystemPrompt(c *gin.Context) {
+	prompt, _ := db.GetSystemPrompt()
+	c.JSON(http.StatusOK, gin.H{"prompt": prompt})
+}
+
+func (s *Server) UpdateSystemPrompt(c *gin.Context) {
+	var req UpdateSettingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := db.SetSetting(db.SystemPromptKey, req.Value); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}

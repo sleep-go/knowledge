@@ -63,6 +63,14 @@
                     </select>
                 </div>
                 <div class="setting-item">
+                    <label>系统提示 (System Prompt)：</label>
+                    <div class="input-group">
+                        <textarea id="system-prompt-input" placeholder="请输入系统提示..." style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; min-height: 100px;"></textarea>
+                        <button id="save-system-prompt" class="primary-btn">保存</button>
+                    </div>
+                    <p class="helper-text">系统提示会影响模型的行为和回答风格。</p>
+                </div>
+                <div class="setting-item">
                     <label>知识库本地目录：</label>
                     <div class="input-group">
                         <input type="text" id="kb-folder-input" placeholder="例如: /Users/sleep/Documents/kb">
