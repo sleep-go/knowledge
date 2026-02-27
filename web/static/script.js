@@ -122,6 +122,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     isClosed = true;
                 }
                 
+                // 检查内容是否为空
+                const trimmedContent = content.trim();
+                if (trimmedContent === '') {
+                    continue; // 跳过空的思考过程块
+                }
+                
                 // 默认展开，不添加 collapsed 类
                 // 如果未闭合，在内容末尾添加 loading 动画
                 let innerHtml = renderMarkdown(content);
