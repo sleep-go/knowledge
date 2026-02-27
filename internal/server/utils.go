@@ -1,6 +1,8 @@
 package server
 
 import (
+	"container/heap"
+	"container/list"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -9,12 +11,112 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"knowledge/internal/db"
 	"knowledge/internal/kb"
 	"knowledge/internal/llm"
 )
+
+type vecCacheEntry struct {
+	id  uint
+	vec []float32
+	exp time.Time
+}
+
+type vecLRUCache struct {
+	mu  sync.Mutex
+	cap int
+	ttl time.Duration
+	ll  *list.List
+	m   map[uint]*list.Element
+}
+
+func newVecLRUCache(capacity int, ttl time.Duration) *vecLRUCache {
+	if capacity <= 0 {
+		capacity = 1024
+	}
+	return &vecLRUCache{
+		cap: capacity,
+		ttl: func() time.Duration {
+			if ttl <= 0 {
+				return 10 * time.Minute
+			}
+			return ttl
+		}(),
+		ll: list.New(),
+		m:  make(map[uint]*list.Element, capacity),
+	}
+}
+
+func (c *vecLRUCache) Get(id uint) ([]float32, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.m[id]; ok {
+		ent := el.Value.(*vecCacheEntry)
+		if !ent.exp.IsZero() && time.Now().After(ent.exp) {
+			c.ll.Remove(el)
+			delete(c.m, id)
+			return nil, false
+		}
+		c.ll.MoveToFront(el)
+		return ent.vec, true
+	}
+	return nil, false
+}
+
+func (c *vecLRUCache) Set(id uint, v []float32) {
+	if id == 0 || len(v) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if el, ok := c.m[id]; ok {
+		ent := el.Value.(*vecCacheEntry)
+		ent.vec = v
+		ent.exp = time.Now().Add(c.ttl)
+		c.ll.MoveToFront(el)
+		return
+	}
+
+	ent := &vecCacheEntry{id: id, vec: v, exp: time.Now().Add(c.ttl)}
+	el := c.ll.PushFront(ent)
+	c.m[id] = el
+
+	for c.ll.Len() > c.cap {
+		back := c.ll.Back()
+		if back == nil {
+			break
+		}
+		be := back.Value.(*vecCacheEntry)
+		delete(c.m, be.id)
+		c.ll.Remove(back)
+	}
+}
+
+var kbVecCache = newVecLRUCache(2048, 10*time.Minute)
+
+type scoredChunk struct {
+	chunk db.KnowledgeBaseChunk
+	sim   float32
+}
+
+type scoredMinHeap []scoredChunk
+
+func (h scoredMinHeap) Len() int            { return len(h) }
+func (h scoredMinHeap) Less(i, j int) bool  { return h[i].sim < h[j].sim }
+func (h scoredMinHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *scoredMinHeap) Push(x interface{}) { *h = append(*h, x.(scoredChunk)) }
+func (h *scoredMinHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
 
 func truncateTextKeepNewlines(s string, n int) string {
 	s = strings.TrimSpace(s)
@@ -187,66 +289,63 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 	// 减少分片数量以防止 Prompt 过长
 	var chunks []db.KnowledgeBaseChunk
 	var err error
-	
-	// 首先尝试使用向量搜索
+
+	// 首先尝试使用向量搜索（两段式：文本候选集 -> 向量精排）
 	if llm.CurrentEngine != nil {
-		// 获取查询的向量表示
-		queryEmbedding, err := llm.CurrentEngine.GetEmbedding(lastUserMsg)
-		if err == nil && len(queryEmbedding) > 0 {
-			// 从数据库中获取所有chunk
-			allChunks, err := db.GetAllKBChunks()
-			if err == nil {
-				// 优化：限制处理的分片数量，提高性能
-				maxChunksToProcess := 500 // 限制处理的分片数量
-				processedChunks := 0
-				
-				// 计算相似度
-				type ChunkWithSimilarity struct {
-					db.KnowledgeBaseChunk
-					Similarity float32
-				}
-				
-				var chunksWithSimilarity []ChunkWithSimilarity
-				for _, chunk := range allChunks {
-					// 限制处理数量
-					if processedChunks >= maxChunksToProcess {
-						break
+		queryEmbedding, e := llm.CurrentEngine.GetEmbedding(lastUserMsg)
+		if e == nil && len(queryEmbedding) > 0 {
+			// 生成候选集：用现有 LIKE 检索缩小范围，避免全表拉取
+			candidateLimit := 400
+			if len([]rune(lastUserMsg)) >= 30 {
+				candidateLimit = 800
+			}
+			candidates, e2 := db.SearchKBChunks(lastUserMsg, candidateLimit)
+			if e2 == nil && len(candidates) > 0 {
+				const topK = 5
+				h := scoredMinHeap{}
+				heap.Init(&h)
+
+				for _, chunk := range candidates {
+					if len(chunk.Vector) == 0 || chunk.ID == 0 {
+						continue
 					}
-					
-					if len(chunk.Vector) > 0 {
-						// 将chunk的向量转换为float32切片
-						chunkEmbedding := bytesToFloat32Slice(chunk.Vector)
-						if len(chunkEmbedding) == len(queryEmbedding) {
-							// 计算余弦相似度
-							similarity := cosineSimilarity(queryEmbedding, chunkEmbedding)
-							chunksWithSimilarity = append(chunksWithSimilarity, ChunkWithSimilarity{
-								KnowledgeBaseChunk: chunk,
-								Similarity:         similarity,
-							})
-							processedChunks++
-						}
+
+					var chunkEmbedding []float32
+					if v, ok := kbVecCache.Get(chunk.ID); ok {
+						chunkEmbedding = v
+					} else {
+						chunkEmbedding = bytesToFloat32Slice(chunk.Vector)
+						kbVecCache.Set(chunk.ID, chunkEmbedding)
+					}
+
+					if len(chunkEmbedding) != len(queryEmbedding) {
+						continue
+					}
+					sim := cosineSimilarity(queryEmbedding, chunkEmbedding)
+					if h.Len() < topK {
+						heap.Push(&h, scoredChunk{chunk: chunk, sim: sim})
+						continue
+					}
+					if h.Len() > 0 && sim > h[0].sim {
+						heap.Pop(&h)
+						heap.Push(&h, scoredChunk{chunk: chunk, sim: sim})
 					}
 				}
-				
-				// 按相似度排序
-				sort.Slice(chunksWithSimilarity, func(i, j int) bool {
-					return chunksWithSimilarity[i].Similarity > chunksWithSimilarity[j].Similarity
-				})
-				
-				// 取前5个结果
-				for i := 0; i < len(chunksWithSimilarity) && i < 5; i++ {
-					chunks = append(chunks, chunksWithSimilarity[i].KnowledgeBaseChunk)
-				}
-				
-				if len(chunks) > 0 {
-					fmt.Printf("[KB] Vector search found %d chunks (processed %d/%d)\n", len(chunks), processedChunks, len(allChunks))
-				} else {
-					fmt.Printf("[KB] Vector search processed %d/%d chunks, no results\n", processedChunks, len(allChunks))
+
+				if h.Len() > 0 {
+					scored := make([]scoredChunk, 0, h.Len())
+					for h.Len() > 0 {
+						scored = append(scored, heap.Pop(&h).(scoredChunk))
+					}
+					sort.Slice(scored, func(i, j int) bool { return scored[i].sim > scored[j].sim })
+					for i := 0; i < len(scored) && i < topK; i++ {
+						chunks = append(chunks, scored[i].chunk)
+					}
 				}
 			}
 		}
 	}
-	
+
 	// 如果向量搜索失败或没有结果，回退到传统的文本搜索
 	if len(chunks) == 0 {
 		chunks, err = db.SearchKBChunks(lastUserMsg, 5)

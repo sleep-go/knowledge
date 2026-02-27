@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"knowledge/internal/db"
@@ -170,14 +172,12 @@ func (s *Server) ChatStream(c *gin.Context) {
 	}
 
 	var response string
-	err = s.withEngineLocked(func() error {
-		history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
-		var e error
-		response, e = WritePlainTokens(c, func(yield func(string) bool) error {
+	history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
+	response, err = StreamPlainTokens(c, func(yield func(string) bool) error {
+		return s.withEngineLocked(func() error {
 			return s.engine.ChatStream(history, yield)
-		}, StreamOptions{})
-		return e
-	})
+		})
+	}, StreamOptions{})
 
 	if err != nil {
 		return
@@ -271,14 +271,12 @@ func (s *Server) ChatStreamWithConversation(c *gin.Context) {
 	}
 
 	var response string
-	err = s.withEngineLocked(func() error {
-		history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
-		var e error
-		response, e = WritePlainTokens(c, func(yield func(string) bool) error {
+	history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
+	response, err = StreamPlainTokens(c, func(yield func(string) bool) error {
+		return s.withEngineLocked(func() error {
 			return s.engine.ChatStream(history, yield)
-		}, StreamOptions{})
-		return e
-	})
+		})
+	}, StreamOptions{})
 
 	if err != nil {
 		return
@@ -316,18 +314,16 @@ func (s *Server) RetryStream(c *gin.Context) {
 	}
 
 	var response string
-	err = s.withEngineLocked(func() error {
-		history := BuildRetryHistoryWithKB(s.kbase, dbMessages, 5)
-		fmt.Printf("[Retry] History length: %d\n", len(history))
-		for i, msg := range history {
-			fmt.Printf("[Retry] Msg %d (%s): %s\n", i, msg.Role, truncateRunes(msg.Content, 50))
-		}
-		var e error
-		response, e = WritePlainTokens(c, func(yield func(string) bool) error {
+	history := BuildRetryHistoryWithKB(s.kbase, dbMessages, 5)
+	fmt.Printf("[Retry] History length: %d\n", len(history))
+	for i, msg := range history {
+		fmt.Printf("[Retry] Msg %d (%s): %s\n", i, msg.Role, truncateRunes(msg.Content, 50))
+	}
+	response, err = StreamPlainTokens(c, func(yield func(string) bool) error {
+		return s.withEngineLocked(func() error {
 			return s.engine.ChatStream(history, yield)
-		}, StreamOptions{})
-		return e
-	})
+		})
+	}, StreamOptions{})
 
 	if err != nil {
 		fmt.Printf("[Retry] Stream error: %v\n", err)
@@ -407,77 +403,71 @@ func (s *Server) OAIChatCompletion(c *gin.Context) {
 		c.Header("Connection", "keep-alive")
 		c.Status(http.StatusOK)
 
-		first := true
-		var streamErr error
-		_ = s.withEngineLocked(func() error {
-			if e, ok := s.engine.(llm.EngineWithOptions); ok {
-				streamErr = e.ChatStreamWithOptions(req.Messages, opts, func(token string) bool {
-					select {
-					case <-c.Request.Context().Done():
-						return false
-					default:
-					}
+		ctx := c.Request.Context()
+		tokenCh := make(chan string, 256)
+		doneCh := make(chan struct{})
+		stopCh := make(chan struct{})
+		var writerErr error
 
-					if first {
-						first = false
-						chunk := gin.H{
-							"id":      id,
-							"object":  "chat.completion.chunk",
-							"created": created,
-							"model":   modelName,
-							"choices": []gin.H{
-								{"index": 0, "delta": gin.H{"role": "assistant"}, "finish_reason": nil},
-							},
-						}
-						b, _ := json.Marshal(chunk)
-						_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-						flusher.Flush()
-					}
+		go func() {
+			defer close(doneCh)
 
-					if token == "" {
-						return true
-					}
-					chunk := gin.H{
-						"id":      id,
-						"object":  "chat.completion.chunk",
-						"created": created,
-						"model":   modelName,
-						"choices": []gin.H{
-							{"index": 0, "delta": gin.H{"content": token}, "finish_reason": nil},
-						},
-					}
-					b, _ := json.Marshal(chunk)
-					_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-					flusher.Flush()
-					return true
-				})
-				return streamErr
+			const (
+				sseMaxBufferedBytes = 2048
+				sseFlushInterval    = 40 * time.Millisecond
+			)
+
+			bw := bufio.NewWriterSize(c.Writer, 8*1024)
+			var pending strings.Builder
+			pendingSize := 0
+			t := time.NewTicker(sseFlushInterval)
+			defer t.Stop()
+
+			writeData := func(b []byte) bool {
+				if _, err := bw.WriteString("data: "); err != nil {
+					writerErr = err
+					close(stopCh)
+					return false
+				}
+				if _, err := bw.Write(b); err != nil {
+					writerErr = err
+					close(stopCh)
+					return false
+				}
+				if _, err := bw.WriteString("\n\n"); err != nil {
+					writerErr = err
+					close(stopCh)
+					return false
+				}
+				if err := bw.Flush(); err != nil {
+					writerErr = err
+					close(stopCh)
+					return false
+				}
+				flusher.Flush()
+				return true
 			}
 
-			streamErr = s.engine.ChatStream(req.Messages, func(token string) bool {
-				select {
-				case <-c.Request.Context().Done():
-					return false
-				default:
-				}
+			// role chunk（先写一次）
+			roleChunk := gin.H{
+				"id":      id,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   modelName,
+				"choices": []gin.H{
+					{"index": 0, "delta": gin.H{"role": "assistant"}, "finish_reason": nil},
+				},
+			}
+			if b, err := json.Marshal(roleChunk); err != nil {
+				writerErr = err
+				close(stopCh)
+				return
+			} else if !writeData(b) {
+				return
+			}
 
-				if first {
-					first = false
-					chunk := gin.H{
-						"id":      id,
-						"object":  "chat.completion.chunk",
-						"created": created,
-						"model":   modelName,
-						"choices": []gin.H{
-							{"index": 0, "delta": gin.H{"role": "assistant"}, "finish_reason": nil},
-						},
-					}
-					b, _ := json.Marshal(chunk)
-					_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-					flusher.Flush()
-				}
-
-				if token == "" {
+			flushPending := func() bool {
+				if pendingSize == 0 {
 					return true
 				}
 				chunk := gin.H{
@@ -486,31 +476,106 @@ func (s *Server) OAIChatCompletion(c *gin.Context) {
 					"created": created,
 					"model":   modelName,
 					"choices": []gin.H{
-						{"index": 0, "delta": gin.H{"content": token}, "finish_reason": nil},
+						{"index": 0, "delta": gin.H{"content": pending.String()}, "finish_reason": nil},
 					},
 				}
-				b, _ := json.Marshal(chunk)
-				_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-				flusher.Flush()
+				b, err := json.Marshal(chunk)
+				if err != nil {
+					writerErr = err
+					close(stopCh)
+					return false
+				}
+				if !writeData(b) {
+					return false
+				}
+				pending.Reset()
+				pendingSize = 0
 				return true
-			})
+			}
+
+			for {
+				select {
+				case <-ctx.Done():
+					writerErr = ctx.Err()
+					close(stopCh)
+					return
+				case <-t.C:
+					if !flushPending() {
+						return
+					}
+				case token, ok := <-tokenCh:
+					if !ok {
+						if !flushPending() {
+							return
+						}
+						// final + done
+						finalChunk := gin.H{
+							"id":      id,
+							"object":  "chat.completion.chunk",
+							"created": created,
+							"model":   modelName,
+							"choices": []gin.H{
+								{"index": 0, "delta": gin.H{}, "finish_reason": "stop"},
+							},
+						}
+						if b, err := json.Marshal(finalChunk); err == nil {
+							_ = writeData(b)
+							_, _ = bw.WriteString("data: [DONE]\n\n")
+							_ = bw.Flush()
+							flusher.Flush()
+						}
+						return
+					}
+					if token == "" {
+						continue
+					}
+					pending.WriteString(token)
+					pendingSize += len(token)
+					if pendingSize >= sseMaxBufferedBytes {
+						if !flushPending() {
+							return
+						}
+					}
+				}
+			}
+		}()
+
+		var streamErr error
+		_ = s.withEngineLocked(func() error {
+			yieldToChan := func(token string) bool {
+				select {
+				case <-ctx.Done():
+					return false
+				case <-stopCh:
+					return false
+				default:
+				}
+				if token == "" {
+					return true
+				}
+				select {
+				case tokenCh <- token:
+					return true
+				case <-ctx.Done():
+					return false
+				case <-stopCh:
+					return false
+				}
+			}
+
+			if e, ok := s.engine.(llm.EngineWithOptions); ok {
+				streamErr = e.ChatStreamWithOptions(req.Messages, opts, yieldToChan)
+				return streamErr
+			}
+			streamErr = s.engine.ChatStream(req.Messages, yieldToChan)
 			return streamErr
 		})
 
-		finalChunk := gin.H{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   modelName,
-			"choices": []gin.H{
-				{"index": 0, "delta": gin.H{}, "finish_reason": "stop"},
-			},
-		}
-		b, _ := json.Marshal(finalChunk)
-		_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
-		flusher.Flush()
+		close(tokenCh)
+		<-doneCh
+
 		_ = streamErr
+		_ = writerErr
 		return
 	}
 

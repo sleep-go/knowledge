@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"knowledge/internal/db"
 	"knowledge/internal/kb"
@@ -150,17 +153,9 @@ func main() {
 	// 将初始化后的引擎赋值给全局变量，供知识库使用
 	llm.CurrentEngine = engine
 
-	// 确保程序退出时清理资源
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		fmt.Println("\n正在关闭...")
-		if closer, ok := engine.(interface{ Close() }); ok {
-			closer.Close()
-		}
-		os.Exit(0)
-	}()
+	// 处理退出信号：优雅关闭 HTTP + 取消 KB 任务 + 释放引擎资源
+	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// 设置路由
 	r := server.SetupRouter(web.StaticFiles, engine, kbase)
@@ -175,8 +170,31 @@ func main() {
 
 	// 启动服务器
 	fmt.Printf("正在端口 %s 启动网络服务器...\n", *port)
-	if err := r.Run(":" + *port); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:    ":" + *port,
+		Handler: r,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-appCtx.Done()
+	fmt.Println("\n正在关闭...")
+
+	// 先取消 KB 后台任务
+	kbase.Close()
+
+	// 关闭 HTTP（给正在进行的请求一个收尾窗口）
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+
+	// 最后关闭模型引擎
+	if closer, ok := engine.(interface{ Close() }); ok {
+		closer.Close()
 	}
 }
 

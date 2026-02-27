@@ -2,6 +2,8 @@ package kb
 
 import (
 	"bytes"
+	"container/list"
+	"context"
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/csv"
@@ -14,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unicode"
 
 	"knowledge/internal/db"
@@ -24,9 +28,86 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-// 向量缓存 - 优化：减少重复内容的向量生成
-var embeddingCache = make(map[string][]byte)
-var cacheMutex sync.RWMutex
+type embeddingCacheEntry struct {
+	key string
+	val []byte
+	exp time.Time
+}
+
+type embeddingLRUCache struct {
+	mu  sync.Mutex
+	cap int
+	ttl time.Duration
+	ll  *list.List
+	m   map[string]*list.Element
+}
+
+func newEmbeddingLRUCache(capacity int, ttl time.Duration) *embeddingLRUCache {
+	if capacity <= 0 {
+		capacity = 2048
+	}
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	return &embeddingLRUCache{
+		cap: capacity,
+		ttl: ttl,
+		ll:  list.New(),
+		m:   make(map[string]*list.Element, capacity),
+	}
+}
+
+func (c *embeddingLRUCache) Get(key string) ([]byte, bool) {
+	if key == "" {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.m[key]; ok {
+		ent := el.Value.(*embeddingCacheEntry)
+		if !ent.exp.IsZero() && time.Now().After(ent.exp) {
+			c.ll.Remove(el)
+			delete(c.m, key)
+			return nil, false
+		}
+		c.ll.MoveToFront(el)
+		return ent.val, true
+	}
+	return nil, false
+}
+
+func (c *embeddingLRUCache) Set(key string, val []byte) {
+	if key == "" || len(val) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if el, ok := c.m[key]; ok {
+		ent := el.Value.(*embeddingCacheEntry)
+		ent.val = val
+		ent.exp = time.Now().Add(c.ttl)
+		c.ll.MoveToFront(el)
+		return
+	}
+
+	ent := &embeddingCacheEntry{key: key, val: val, exp: time.Now().Add(c.ttl)}
+	el := c.ll.PushFront(ent)
+	c.m[key] = el
+
+	for c.ll.Len() > c.cap {
+		back := c.ll.Back()
+		if back == nil {
+			break
+		}
+		be := back.Value.(*embeddingCacheEntry)
+		delete(c.m, be.key)
+		c.ll.Remove(back)
+	}
+}
+
+// 向量缓存 - 优化：减少重复内容的向量生成（有界 + TTL）
+var embeddingCache = newEmbeddingLRUCache(2048, 10*time.Minute)
 
 // ChunkProgress 文件分片进度信息
 type ChunkProgress struct {
@@ -52,10 +133,19 @@ type KnowledgeBase struct {
 	progressMu sync.Mutex
 	isSyncing  bool
 	syncMu     sync.Mutex
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 func NewKnowledgeBase() *KnowledgeBase {
-	return &KnowledgeBase{}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &KnowledgeBase{ctx: ctx, cancel: cancel}
+}
+
+func (kb *KnowledgeBase) Close() {
+	if kb.cancel != nil {
+		kb.cancel()
+	}
 }
 
 // GetSyncProgress 获取当前同步进度
@@ -130,6 +220,13 @@ func (kb *KnowledgeBase) AddFile(path string) error {
 
 // ScanFolder 扫描文件夹并同步到数据库
 func (kb *KnowledgeBase) ScanFolder() error {
+	if kb.ctx != nil {
+		select {
+		case <-kb.ctx.Done():
+			return kb.ctx.Err()
+		default:
+		}
+	}
 	// 检查是否正在同步中
 	kb.syncMu.Lock()
 	if kb.isSyncing {
@@ -171,6 +268,13 @@ func (kb *KnowledgeBase) ScanFolder() error {
 	})
 
 	err = filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+		if kb.ctx != nil {
+			select {
+			case <-kb.ctx.Done():
+				return kb.ctx.Err()
+			default:
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -257,6 +361,13 @@ func (kb *KnowledgeBase) ScanFolder() error {
 
 // ProcessFiles 处理待处理的文件
 func (kb *KnowledgeBase) ProcessFiles() error {
+	if kb.ctx != nil {
+		select {
+		case <-kb.ctx.Done():
+			return kb.ctx.Err()
+		default:
+		}
+	}
 	// 检查是否正在同步中
 	kb.syncMu.Lock()
 	if kb.isSyncing {
@@ -298,7 +409,7 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 	}
 
 	totalFiles := len(pendingFiles)
-	processedCount := 0
+	var processedCount atomic.Int64
 
 	// 更新进度为处理开始
 	kb.UpdateSyncProgress(SyncProgress{
@@ -312,7 +423,8 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 	// 并发处理文件
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(pendingFiles))
-	progressChan := make(chan db.KnowledgeBaseFile, len(pendingFiles))
+	progressChan := make(chan struct{}, len(pendingFiles))
+	progressDone := make(chan struct{})
 
 	// 控制并发数量
 	concurrencyLimit := 5
@@ -323,17 +435,27 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 		go func(file db.KnowledgeBaseFile) {
 			defer wg.Done()
 
+			if kb.ctx != nil {
+				select {
+				case <-kb.ctx.Done():
+					errChan <- kb.ctx.Err()
+					return
+				default:
+				}
+			}
+
 			// 申请信号量
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
 			// 更新当前处理的文件
+			cur := processedCount.Load()
 			kb.UpdateSyncProgress(SyncProgress{
 				TotalFiles:     totalFiles,
-				ProcessedFiles: processedCount,
+				ProcessedFiles: int(cur),
 				CurrentFile:    file.Path,
 				Status:         "processing",
-				Progress:       float64(processedCount) / float64(totalFiles) * 100,
+				Progress:       float64(cur) / float64(totalFiles) * 100,
 			})
 
 			if err := kb.processFile(file); err != nil {
@@ -344,19 +466,20 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 			}
 
 			_ = db.UpdateKBFileStatus(file.ID, "processed")
-			progressChan <- file
+			progressChan <- struct{}{}
 		}(f)
 	}
 
 	// 处理进度更新
 	go func() {
+		defer close(progressDone)
 		for range pendingFiles {
 			<-progressChan
-			processedCount++
-			progress := float64(processedCount) / float64(totalFiles) * 100
+			cur := processedCount.Add(1)
+			progress := float64(cur) / float64(totalFiles) * 100
 			kb.UpdateSyncProgress(SyncProgress{
 				TotalFiles:     totalFiles,
-				ProcessedFiles: processedCount,
+				ProcessedFiles: int(cur),
 				CurrentFile:    "",
 				Status:         "processing",
 				Progress:       progress,
@@ -368,6 +491,7 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 	wg.Wait()
 	close(errChan)
 	close(progressChan)
+	<-progressDone
 
 	// 更新进度为处理完成
 	kb.UpdateSyncProgress(SyncProgress{
@@ -459,12 +583,9 @@ func getEmbedding(text string) ([]byte, error) {
 	key := fmt.Sprintf("%x", hash)
 
 	// 检查缓存
-	cacheMutex.RLock()
-	if vector, ok := embeddingCache[key]; ok {
-		cacheMutex.RUnlock()
+	if vector, ok := embeddingCache.Get(key); ok {
 		return vector, nil
 	}
-	cacheMutex.RUnlock()
 
 	if llm.CurrentEngine == nil {
 		return nil, fmt.Errorf("LLM engine not initialized")
@@ -478,9 +599,7 @@ func getEmbedding(text string) ([]byte, error) {
 	vector := Float32SliceToBytes(embedding)
 
 	// 存入缓存
-	cacheMutex.Lock()
-	embeddingCache[key] = vector
-	cacheMutex.Unlock()
+	embeddingCache.Set(key, vector)
 
 	return vector, nil
 }
@@ -507,11 +626,6 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	}
 
 	if err != nil {
-		return err
-	}
-
-	// 先删除旧切片
-	if err := db.DeleteKBChunks(f.ID); err != nil {
 		return err
 	}
 
@@ -556,72 +670,77 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	kb.progress.ChunkProgress = []ChunkProgress{chunkProgress}
 	kb.progressMu.Unlock()
 
-	// 并发处理切片的向量生成和存储
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(validChunks))
-	progressChan := make(chan struct{}, len(validChunks))
-
-	// 控制并发数量 - 优化：进一步增加并发数
-	chunkConcurrencyLimit := 30 // 增加到 30 以提高 XLSX 文件处理速度
-	chunkSemaphore := make(chan struct{}, chunkConcurrencyLimit)
-
-	for _, chunk := range validChunks {
-		wg.Add(1)
-		go func(chunkContent string) {
-			defer wg.Done()
-
-			// 申请信号量
-			chunkSemaphore <- struct{}{}
-			defer func() { <-chunkSemaphore }()
-
-			// 生成向量
-			vector, err := getEmbedding(chunkContent)
-			if err != nil {
-				// 如果生成向量失败，继续处理，不返回错误
-				fmt.Printf("Error getting embedding: %v\n", err)
-				vector = nil
-			}
-
-			if err := db.SaveKBChunk(f.ID, chunkContent, vector); err != nil {
-				errChan <- err
-				return
-			}
-
-			// 处理完成一个分片，发送进度更新
-			progressChan <- struct{}{}
-		}(chunk)
+	// 单事务 + 批量写入：减少 SQLite 写锁争用，并避免中途失败导致数据不一致
+	tx := db.DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
 	}
-
-	// 处理分片进度更新
-	go func() {
-		for range validChunks {
-			<-progressChan
-			processedChunks++
-			progress := float64(processedChunks) / float64(totalChunks) * 100
-
-			// 更新分片进度
-			kb.progressMu.Lock()
-			kb.progress.ChunkProgress = []ChunkProgress{{
-				FileName:        fileName,
-				TotalChunks:     totalChunks,
-				ProcessedChunks: processedChunks,
-				Progress:        progress,
-			}}
-			kb.progressMu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			panic(r)
 		}
 	}()
 
-	// 等待所有处理完成
-	wg.Wait()
-	close(errChan)
-	close(progressChan)
+	if err := tx.Where("file_id = ?", f.ID).Delete(&db.KnowledgeBaseChunk{}).Error; err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 
-	// 检查是否有错误
-	for err := range errChan {
+	const batchSize = 200
+	batch := make([]db.KnowledgeBaseChunk, 0, batchSize)
+
+	for _, chunkContent := range validChunks {
+		if kb.ctx != nil {
+			select {
+			case <-kb.ctx.Done():
+				_ = tx.Rollback()
+				return kb.ctx.Err()
+			default:
+			}
+		}
+		// 生成向量（失败则降级为空向量，仍保留 content 供文本检索）
+		vector, err := getEmbedding(chunkContent)
 		if err != nil {
-			// 只返回第一个错误
+			fmt.Printf("Error getting embedding: %v\n", err)
+			vector = nil
+		}
+
+		batch = append(batch, db.KnowledgeBaseChunk{
+			FileID:  f.ID,
+			Content: chunkContent,
+			Vector:  vector,
+		})
+
+		processedChunks++
+		progress := float64(processedChunks) / float64(totalChunks) * 100
+		kb.progressMu.Lock()
+		kb.progress.ChunkProgress = []ChunkProgress{{
+			FileName:        fileName,
+			TotalChunks:     totalChunks,
+			ProcessedChunks: processedChunks,
+			Progress:        progress,
+		}}
+		kb.progressMu.Unlock()
+
+		if len(batch) >= batchSize {
+			if err := tx.CreateInBatches(batch, batchSize).Error; err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			batch = batch[:0]
+		}
+	}
+
+	if len(batch) > 0 {
+		if err := tx.CreateInBatches(batch, batchSize).Error; err != nil {
+			_ = tx.Rollback()
 			return err
 		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return err
 	}
 
 	return nil
