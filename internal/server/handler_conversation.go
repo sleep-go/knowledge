@@ -99,10 +99,15 @@ func (s *Server) UpdateMessage(c *gin.Context) {
 
 	convID := uint(id)
 	lastUser, err := db.GetLastUserMessage(convID)
-	if err != nil || lastUser == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no user message"})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get last user message: " + err.Error()})
 		return
 	}
+	if lastUser == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no user message found"})
+		return
+	}
+
 	if lastUser.ID != uint(mid) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only last user message can be edited"})
 		return

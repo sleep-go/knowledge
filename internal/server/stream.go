@@ -93,10 +93,15 @@ func WritePlainTokens(c *gin.Context, produce TokenProducer, opts StreamOptions)
 
 	// 如果没有输出任何内容且没有错误，这也是一种异常情况
 	if out.Len() == 0 {
+		select {
+		case <-c.Request.Context().Done():
+			return "", nil
+		default:
+		}
 		errMsg := "Model produced no output (check logs for details)"
 		_, _ = c.Writer.WriteString(opts.ErrorPrefix + errMsg)
 		flusher.Flush()
-		return "", fmt.Errorf(errMsg)
+		return "", fmt.Errorf("%s", errMsg)
 	}
 
 	return out.String(), nil

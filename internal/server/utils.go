@@ -117,9 +117,11 @@ func heuristicTitleFromUser(s string) string {
 }
 
 func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, lastUserMsg string) []llm.ChatMessage {
-	// 构建新的Prompt结构
-	prompt := "你是一个本地知识库助手。\n"
-	prompt += "请仅基于提供的上下文回答问题。\n\n"
+	if db.DB == nil {
+		return history
+	}
+	// 优化：精简 Prompt 结构，减少 token 占用
+	prompt := "你是一个本地知识库助手。请仅基于提供的上下文回答问题。\n\n"
 
 	// 1. 尝试直接读取附件内容
 	// 匹配前端生成的: [已上传文件: [filename](/api/kb/download?file=...)]
@@ -194,6 +196,10 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 			// 从数据库中获取所有chunk
 			allChunks, err := db.GetAllKBChunks()
 			if err == nil {
+				// 优化：限制处理的分片数量，提高性能
+				maxChunksToProcess := 500 // 限制处理的分片数量
+				processedChunks := 0
+				
 				// 计算相似度
 				type ChunkWithSimilarity struct {
 					db.KnowledgeBaseChunk
@@ -202,6 +208,11 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 				
 				var chunksWithSimilarity []ChunkWithSimilarity
 				for _, chunk := range allChunks {
+					// 限制处理数量
+					if processedChunks >= maxChunksToProcess {
+						break
+					}
+					
 					if len(chunk.Vector) > 0 {
 						// 将chunk的向量转换为float32切片
 						chunkEmbedding := bytesToFloat32Slice(chunk.Vector)
@@ -212,6 +223,7 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 								KnowledgeBaseChunk: chunk,
 								Similarity:         similarity,
 							})
+							processedChunks++
 						}
 					}
 				}
@@ -227,7 +239,9 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 				}
 				
 				if len(chunks) > 0 {
-					fmt.Printf("[KB] Vector search found %d chunks\n", len(chunks))
+					fmt.Printf("[KB] Vector search found %d chunks (processed %d/%d)\n", len(chunks), processedChunks, len(allChunks))
+				} else {
+					fmt.Printf("[KB] Vector search processed %d/%d chunks, no results\n", processedChunks, len(allChunks))
 				}
 			}
 		}
@@ -241,8 +255,8 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 	if err == nil && len(chunks) > 0 {
 		fmt.Printf("[KB] Found %d chunks for query: %s\n", len(chunks), lastUserMsg)
 
-		// 限制 KB 总字符数
-		const maxKBChars = 3000
+		// 优化：减少 KB 总字符数，避免超出模型上下文限制
+		const maxKBChars = 2000 // 减少到 2000 字符，约 500-600 token
 		totalLen := 0
 		var validChunks []db.KnowledgeBaseChunk
 
@@ -268,7 +282,8 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 		fmt.Printf("[KB] Total context length (chars): %d\n", totalLen)
 
 		for i, chunk := range validChunks {
-			prompt += fmt.Sprintf("[上下文%d]\n%s\n\n", i+1, chunk.Content)
+			// 优化：简化上下文标记，减少 token
+			prompt += fmt.Sprintf("[参考%d]\n%s\n\n", i+1, chunk.Content)
 		}
 	}
 

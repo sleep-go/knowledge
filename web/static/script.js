@@ -1033,6 +1033,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     syncKBBtn.addEventListener('click', async () => {
+        if (syncKBBtn.disabled) return; // 防止重复点击
+        
         syncStatus.textContent = '正在同步...';
         syncKBBtn.disabled = true;
         resetKBBtn.disabled = true;

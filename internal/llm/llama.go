@@ -99,12 +99,12 @@ func (l *LlamaEngine) ChatStream(history []ChatMessage, onToken func(token strin
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// 增加 MaxTokens 限制到 2048，进一步防止输出被截断
-	// 如果需要支持更长的回复，可以继续增加此值，但要注意不要超过总上下文窗口大小
-	maxTokens := 2048
+	// 优化：大幅增加 MaxTokens，允许生成更长的回复
+	maxTokens := 4096 // 从 2048 增加到 4096
 	fmt.Printf("[LlamaEngine] Starting stream with MaxTokens: %d\n", maxTokens)
-	
-	return l.model.ChatStream(string(b), nil, maxTokens, 0.7, 0.95, 40, 1.1, func(piece string) bool {
+
+	// 优化生成参数：降低 repeat_penalty，减少过早停止
+	return l.model.ChatStream(string(b), nil, maxTokens, 0.7, 0.95, 40, 1.05, func(piece string) bool {
 		if piece == "" {
 			return true
 		}
@@ -125,8 +125,9 @@ func (l *LlamaEngine) ChatWithOptions(history []ChatMessage, opts ChatOptions) (
 	if opts.TopK == 0 {
 		opts.TopK = 40
 	}
+	// 优化：降低 repeat_penalty，减少过早停止
 	if opts.RepeatPenalty == 0 {
-		opts.RepeatPenalty = 1.1
+		opts.RepeatPenalty = 1.05
 	}
 
 	b, err := buildMessagesWithSystemPrompt(history, getSystemPrompt())
@@ -153,8 +154,9 @@ func (l *LlamaEngine) ChatStreamWithOptions(history []ChatMessage, opts ChatOpti
 	if opts.TopK == 0 {
 		opts.TopK = 40
 	}
+	// 优化：降低 repeat_penalty，减少过早停止
 	if opts.RepeatPenalty == 0 {
-		opts.RepeatPenalty = 1.1
+		opts.RepeatPenalty = 1.05
 	}
 
 	b, err := buildMessagesWithSystemPrompt(history, getSystemPrompt())

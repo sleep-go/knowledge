@@ -34,13 +34,21 @@ type OAIChatCompletionRequest struct {
 
 func (s *Server) ListModels(c *gin.Context) {
 	// 获取可用模型列表
-	models, err := s.engine.ListModels()
+	var models []string
+	currentPath := ""
+	err := s.withEngineLocked(func() error {
+		var e error
+		models, e = s.engine.ListModels()
+		if e != nil {
+			return e
+		}
+		currentPath = s.engine.GetModelPath()
+		return nil
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// 获取当前模型路径
-	currentPath := s.engine.GetModelPath()
 	// 提取文件名
 	currentModel := ""
 	if currentPath != "" {
@@ -62,19 +70,19 @@ func (s *Server) SelectModel(c *gin.Context) {
 		return
 	}
 
-	// 获取当前模型所在目录
-	currentPath := s.engine.GetModelPath()
-	dir := "models" // 默认目录
-	if currentPath != "" {
-		dir = filepath.Dir(currentPath)
-	}
-
-	// 构建新模型路径
-	newPath := filepath.Join(dir, req.Model)
-
-	// 切换模型
-	if err := s.engine.SwitchModel(newPath); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	var switchErr error
+	_ = s.withEngineLocked(func() error {
+		currentPath := s.engine.GetModelPath()
+		dir := "models"
+		if currentPath != "" {
+			dir = filepath.Dir(currentPath)
+		}
+		newPath := filepath.Join(dir, req.Model)
+		switchErr = s.engine.SwitchModel(newPath)
+		return switchErr
+	})
+	if switchErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": switchErr.Error()})
 		return
 	}
 
@@ -118,7 +126,12 @@ func (s *Server) Chat(c *gin.Context) {
 		})
 	}
 
-	response, err := s.engine.Chat(history)
+	var response string
+	err = s.withEngineLocked(func() error {
+		var e error
+		response, e = s.engine.Chat(history)
+		return e
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -156,11 +169,15 @@ func (s *Server) ChatStream(c *gin.Context) {
 		return
 	}
 
-	history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
-
-	response, err := WritePlainTokens(c, func(yield func(string) bool) error {
-		return s.engine.ChatStream(history, yield)
-	}, StreamOptions{})
+	var response string
+	err = s.withEngineLocked(func() error {
+		history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
+		var e error
+		response, e = WritePlainTokens(c, func(yield func(string) bool) error {
+			return s.engine.ChatStream(history, yield)
+		}, StreamOptions{})
+		return e
+	})
 
 	if err != nil {
 		return
@@ -204,9 +221,13 @@ func (s *Server) ChatWithConversation(c *gin.Context) {
 		history = append(history, llm.ChatMessage{Role: dbMessages[i].Role, Content: dbMessages[i].Content})
 	}
 
-	history = augmentHistoryWithKB(s.kbase, history, req.Message)
-
-	response, err := s.engine.Chat(history)
+	var response string
+	err = s.withEngineLocked(func() error {
+		history = augmentHistoryWithKB(s.kbase, history, req.Message)
+		var e error
+		response, e = s.engine.Chat(history)
+		return e
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -216,7 +237,10 @@ func (s *Server) ChatWithConversation(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	tryGenerateSmartTitle(convID, s.engine)
+	_ = s.withEngineLocked(func() error {
+		tryGenerateSmartTitle(convID, s.engine)
+		return nil
+	})
 
 	c.JSON(http.StatusOK, ChatResponse{Response: response})
 }
@@ -246,18 +270,25 @@ func (s *Server) ChatStreamWithConversation(c *gin.Context) {
 		return
 	}
 
-	history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
-
-	response, err := WritePlainTokens(c, func(yield func(string) bool) error {
-		return s.engine.ChatStream(history, yield)
-	}, StreamOptions{})
+	var response string
+	err = s.withEngineLocked(func() error {
+		history := BuildHistoryWithKB(s.kbase, dbMessages, 10, req.Message)
+		var e error
+		response, e = WritePlainTokens(c, func(yield func(string) bool) error {
+			return s.engine.ChatStream(history, yield)
+		}, StreamOptions{})
+		return e
+	})
 
 	if err != nil {
 		return
 	}
 
 	_ = db.SaveMessage(convID, "assistant", response)
-	tryGenerateSmartTitle(convID, s.engine)
+	_ = s.withEngineLocked(func() error {
+		tryGenerateSmartTitle(convID, s.engine)
+		return nil
+	})
 }
 
 func (s *Server) RetryStream(c *gin.Context) {
@@ -284,15 +315,19 @@ func (s *Server) RetryStream(c *gin.Context) {
 		return
 	}
 
-	history := BuildRetryHistoryWithKB(s.kbase, dbMessages, 5)
-	fmt.Printf("[Retry] History length: %d\n", len(history))
-	for i, msg := range history {
-		fmt.Printf("[Retry] Msg %d (%s): %s\n", i, msg.Role, truncateRunes(msg.Content, 50))
-	}
-
-	response, err := WritePlainTokens(c, func(yield func(string) bool) error {
-		return s.engine.ChatStream(history, yield)
-	}, StreamOptions{})
+	var response string
+	err = s.withEngineLocked(func() error {
+		history := BuildRetryHistoryWithKB(s.kbase, dbMessages, 5)
+		fmt.Printf("[Retry] History length: %d\n", len(history))
+		for i, msg := range history {
+			fmt.Printf("[Retry] Msg %d (%s): %s\n", i, msg.Role, truncateRunes(msg.Content, 50))
+		}
+		var e error
+		response, e = WritePlainTokens(c, func(yield func(string) bool) error {
+			return s.engine.ChatStream(history, yield)
+		}, StreamOptions{})
+		return e
+	})
 
 	if err != nil {
 		fmt.Printf("[Retry] Stream error: %v\n", err)
@@ -303,7 +338,10 @@ func (s *Server) RetryStream(c *gin.Context) {
 	}
 
 	_ = db.SaveMessage(convID, "assistant", response)
-	tryGenerateSmartTitle(convID, s.engine)
+	_ = s.withEngineLocked(func() error {
+		tryGenerateSmartTitle(convID, s.engine)
+		return nil
+	})
 }
 
 func (s *Server) OAIChatCompletion(c *gin.Context) {
@@ -371,48 +409,51 @@ func (s *Server) OAIChatCompletion(c *gin.Context) {
 
 		first := true
 		var streamErr error
-		if e, ok := s.engine.(llm.EngineWithOptions); ok {
-			streamErr = e.ChatStreamWithOptions(req.Messages, opts, func(token string) bool {
-				select {
-				case <-c.Request.Context().Done():
-					return false
-				default:
-				}
+		_ = s.withEngineLocked(func() error {
+			if e, ok := s.engine.(llm.EngineWithOptions); ok {
+				streamErr = e.ChatStreamWithOptions(req.Messages, opts, func(token string) bool {
+					select {
+					case <-c.Request.Context().Done():
+						return false
+					default:
+					}
 
-				if first {
-					first = false
+					if first {
+						first = false
+						chunk := gin.H{
+							"id":      id,
+							"object":  "chat.completion.chunk",
+							"created": created,
+							"model":   modelName,
+							"choices": []gin.H{
+								{"index": 0, "delta": gin.H{"role": "assistant"}, "finish_reason": nil},
+							},
+						}
+						b, _ := json.Marshal(chunk)
+						_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
+						flusher.Flush()
+					}
+
+					if token == "" {
+						return true
+					}
 					chunk := gin.H{
 						"id":      id,
 						"object":  "chat.completion.chunk",
 						"created": created,
 						"model":   modelName,
 						"choices": []gin.H{
-							{"index": 0, "delta": gin.H{"role": "assistant"}, "finish_reason": nil},
+							{"index": 0, "delta": gin.H{"content": token}, "finish_reason": nil},
 						},
 					}
 					b, _ := json.Marshal(chunk)
 					_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
 					flusher.Flush()
-				}
-
-				if token == "" {
 					return true
-				}
-				chunk := gin.H{
-					"id":      id,
-					"object":  "chat.completion.chunk",
-					"created": created,
-					"model":   modelName,
-					"choices": []gin.H{
-						{"index": 0, "delta": gin.H{"content": token}, "finish_reason": nil},
-					},
-				}
-				b, _ := json.Marshal(chunk)
-				_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-				flusher.Flush()
-				return true
-			})
-		} else {
+				})
+				return streamErr
+			}
+
 			streamErr = s.engine.ChatStream(req.Messages, func(token string) bool {
 				select {
 				case <-c.Request.Context().Done():
@@ -453,7 +494,8 @@ func (s *Server) OAIChatCompletion(c *gin.Context) {
 				flusher.Flush()
 				return true
 			})
-		}
+			return streamErr
+		})
 
 		finalChunk := gin.H{
 			"id":      id,
@@ -474,11 +516,16 @@ func (s *Server) OAIChatCompletion(c *gin.Context) {
 
 	var respText string
 	var err error
-	if e, ok := s.engine.(llm.EngineWithOptions); ok {
-		respText, err = e.ChatWithOptions(req.Messages, opts)
-	} else {
-		respText, err = s.engine.Chat(req.Messages)
-	}
+	err = s.withEngineLocked(func() error {
+		if e, ok := s.engine.(llm.EngineWithOptions); ok {
+			var e2 error
+			respText, e2 = e.ChatWithOptions(req.Messages, opts)
+			return e2
+		}
+		var e2 error
+		respText, e2 = s.engine.Chat(req.Messages)
+		return e2
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

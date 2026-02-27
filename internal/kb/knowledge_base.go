@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"knowledge/internal/db"
 	"knowledge/internal/llm"
@@ -20,6 +23,10 @@ import (
 	"github.com/lu4p/cat"
 	"github.com/xuri/excelize/v2"
 )
+
+// 向量缓存 - 优化：减少重复内容的向量生成
+var embeddingCache = make(map[string][]byte)
+var cacheMutex sync.RWMutex
 
 // ChunkProgress 文件分片进度信息
 type ChunkProgress struct {
@@ -43,6 +50,8 @@ type KnowledgeBase struct {
 	mu         sync.Mutex
 	progress   SyncProgress
 	progressMu sync.Mutex
+	isSyncing  bool
+	syncMu     sync.Mutex
 }
 
 func NewKnowledgeBase() *KnowledgeBase {
@@ -121,6 +130,22 @@ func (kb *KnowledgeBase) AddFile(path string) error {
 
 // ScanFolder 扫描文件夹并同步到数据库
 func (kb *KnowledgeBase) ScanFolder() error {
+	// 检查是否正在同步中
+	kb.syncMu.Lock()
+	if kb.isSyncing {
+		kb.syncMu.Unlock()
+		return fmt.Errorf("sync already in progress")
+	}
+	kb.isSyncing = true
+	kb.syncMu.Unlock()
+
+	// 函数结束时重置同步状态
+	defer func() {
+		kb.syncMu.Lock()
+		kb.isSyncing = false
+		kb.syncMu.Unlock()
+	}()
+
 	folder, err := db.GetKBFolder()
 	if err != nil || folder == "" {
 		return fmt.Errorf("knowledge base folder not set")
@@ -232,6 +257,22 @@ func (kb *KnowledgeBase) ScanFolder() error {
 
 // ProcessFiles 处理待处理的文件
 func (kb *KnowledgeBase) ProcessFiles() error {
+	// 检查是否正在同步中
+	kb.syncMu.Lock()
+	if kb.isSyncing {
+		kb.syncMu.Unlock()
+		return fmt.Errorf("sync already in progress")
+	}
+	kb.isSyncing = true
+	kb.syncMu.Unlock()
+
+	// 函数结束时重置同步状态
+	defer func() {
+		kb.syncMu.Lock()
+		kb.isSyncing = false
+		kb.syncMu.Unlock()
+	}()
+
 	files, err := db.ListKBFiles()
 	if err != nil {
 		return err
@@ -356,8 +397,10 @@ func (kb *KnowledgeBase) GetFileContent(path string) (string, error) {
 		return extractTextFromPDF(path)
 	case ".docx":
 		return extractTextFromDocx(path)
-	case ".xlsx":
+	case ".xlsx", ".xls":
 		return extractTextFromXlsx(path)
+	case ".csv":
+		return extractTextFromCsv(path)
 	default:
 		// 默认处理文本文件
 		b, err := os.ReadFile(path)
@@ -411,6 +454,18 @@ func CosineSimilarity(a, b []float32) float32 {
 
 // getEmbedding 获取文本的向量表示
 func getEmbedding(text string) ([]byte, error) {
+	// 计算文本哈希作为缓存键
+	hash := md5.Sum([]byte(text))
+	key := fmt.Sprintf("%x", hash)
+
+	// 检查缓存
+	cacheMutex.RLock()
+	if vector, ok := embeddingCache[key]; ok {
+		cacheMutex.RUnlock()
+		return vector, nil
+	}
+	cacheMutex.RUnlock()
+
 	if llm.CurrentEngine == nil {
 		return nil, fmt.Errorf("LLM engine not initialized")
 	}
@@ -420,7 +475,14 @@ func getEmbedding(text string) ([]byte, error) {
 		return nil, err
 	}
 
-	return Float32SliceToBytes(embedding), nil
+	vector := Float32SliceToBytes(embedding)
+
+	// 存入缓存
+	cacheMutex.Lock()
+	embeddingCache[key] = vector
+	cacheMutex.Unlock()
+
+	return vector, nil
 }
 
 func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
@@ -433,7 +495,7 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		content, err = extractTextFromPDF(f.Path)
 	case ".docx":
 		content, err = extractTextFromDocx(f.Path)
-	case ".xlsx":
+	case ".xlsx", ".xls":
 		content, err = extractTextFromXlsx(f.Path)
 	default:
 		// 默认处理文本文件
@@ -453,8 +515,18 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		return err
 	}
 
-	// 简单切片：按行或者按固定长度
-	chunks := splitText(content, 1000, 200) // 每 1000 字一个切片，200 字重叠，增大分片大小以提高处理效率
+	// 优化：根据文件类型调整分片大小
+	var chunks []string
+	switch ext {
+	case ".pdf":
+		chunks = splitText(content, 1500, 250) // PDF 内容更适合较大分片
+	case ".docx":
+		chunks = splitText(content, 1200, 200)
+	case ".xlsx", ".xls":
+		chunks = splitText(content, 2000, 300) // XLSX 和 XLS 文件使用更大的分片，减少分片数量
+	default:
+		chunks = splitText(content, 1000, 150) // 普通文本适当减小重叠
+	}
 
 	// 过滤空切片
 	var validChunks []string
@@ -489,8 +561,8 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	errChan := make(chan error, len(validChunks))
 	progressChan := make(chan struct{}, len(validChunks))
 
-	// 控制并发数量
-	chunkConcurrencyLimit := 10
+	// 控制并发数量 - 优化：进一步增加并发数
+	chunkConcurrencyLimit := 30 // 增加到 30 以提高 XLSX 文件处理速度
 	chunkSemaphore := make(chan struct{}, chunkConcurrencyLimit)
 
 	for _, chunk := range validChunks {
@@ -592,24 +664,221 @@ func extractTextFromXlsx(path string) (string, error) {
 	var fullText strings.Builder
 	sheets := f.GetSheetList()
 	for _, sheet := range sheets {
+		// 添加工作表名称
+		fullText.WriteString("工作表: ")
+		fullText.WriteString(sheet)
+		fullText.WriteString("\n")
+
+		// 获取工作表的最大行数和列数
+		dimension, err := f.GetSheetDimension(sheet)
+		if err != nil {
+			continue
+		}
+
+		// 解析维度字符串，获取最大行号
+		maxRow := 0
+		if dimension != "" {
+			parts := strings.Split(dimension, ":")
+			if len(parts) == 2 {
+				endCell := parts[1]
+				rowStr := ""
+				for _, char := range endCell {
+					if unicode.IsDigit(char) {
+						rowStr += string(char)
+					}
+				}
+				if rowStr != "" {
+					maxRow, _ = strconv.Atoi(rowStr)
+				}
+			}
+		}
+
+		// 根据文件大小动态调整处理行数
+		fileInfo, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		fileSize := fileInfo.Size()
+
+		// 计算最大处理行数：文件大小每增加1MB，增加1000行，最大不超过40000行
+		maxProcessRows := int(fileSize/(1024*1024)) * 1000
+		if maxProcessRows < 1000 {
+			maxProcessRows = 1000
+		}
+		if maxProcessRows > 40000 {
+			maxProcessRows = 40000
+		}
+
+		// 如果工作表行数小于最大处理行数，则处理所有行
+		if maxRow < maxProcessRows {
+			maxProcessRows = maxRow
+		}
+
+		// 获取所有行数据
 		rows, err := f.GetRows(sheet)
 		if err != nil {
 			continue
 		}
-		for _, row := range rows {
-			for _, colCell := range row {
-				fullText.WriteString(colCell)
-				fullText.WriteString("\t")
+
+		// 获取表头（第一行）
+		var headers []string
+		if len(rows) > 0 {
+			headerCells := rows[0]
+			headers = make([]string, len(headerCells))
+			copy(headers, headerCells)
+
+			// 写入markdown表格格式的表头
+			fullText.WriteString("| ")
+			for _, header := range headers {
+				fullText.WriteString(header)
+				fullText.WriteString(" | ")
+			}
+			fullText.WriteString("\n")
+
+			// 写入表头分隔线
+			fullText.WriteString("| ")
+			for _, header := range headers {
+				fullText.WriteString(strings.Repeat("-", len(header)))
+				fullText.WriteString(" | ")
 			}
 			fullText.WriteString("\n")
 		}
+
+		// 逐行处理，避免一次性加载所有行
+		startRow := 1 // 从第二行开始处理数据（索引为1）
+		if len(rows) < startRow {
+			startRow = 0
+		}
+
+		for row := startRow; row < len(rows) && row < maxProcessRows; row++ {
+			cells := rows[row]
+
+			// 跳过空行
+			isEmptyRow := true
+			for _, cell := range cells {
+				if cell != "" {
+					isEmptyRow = false
+					break
+				}
+			}
+			if isEmptyRow {
+				continue
+			}
+
+			// 写入markdown表格格式的数据行
+			fullText.WriteString("| ")
+			for _, cell := range cells {
+				fullText.WriteString(cell)
+				fullText.WriteString(" | ")
+			}
+			fullText.WriteString("\n")
+		}
+
+		// 添加工作表分隔符
+		fullText.WriteString("\n" + strings.Repeat("-", 80) + "\n\n")
 	}
+	return fullText.String(), nil
+}
+
+func extractTextFromCsv(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var fullText strings.Builder
+	reader := csv.NewReader(f)
+
+	// 根据文件大小动态调整处理行数
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	fileSize := fileInfo.Size()
+
+	// 计算最大处理行数：文件大小每增加1MB，增加1000行，最大不超过40000行
+	maxProcessRows := int(fileSize/(1024*1024)) * 1000
+	if maxProcessRows < 1000 {
+		maxProcessRows = 1000
+	}
+	if maxProcessRows > 40000 {
+		maxProcessRows = 40000
+	}
+
+	// 添加文件名称
+	fullText.WriteString("CSV文件: ")
+	fullText.WriteString(filepath.Base(path))
+	fullText.WriteString("\n")
+
+	// 获取表头（第一行）
+	var headers []string
+	headerRow, err := reader.Read()
+	if err == nil {
+		headers = make([]string, len(headerRow))
+		copy(headers, headerRow)
+
+		// 写入markdown表格格式的表头
+		fullText.WriteString("| ")
+		for _, header := range headers {
+			fullText.WriteString(header)
+			fullText.WriteString(" | ")
+		}
+		fullText.WriteString("\n")
+
+		// 写入表头分隔线
+		fullText.WriteString("| ")
+		for _, header := range headers {
+			fullText.WriteString(strings.Repeat("-", len(header)))
+			fullText.WriteString(" | ")
+		}
+		fullText.WriteString("\n")
+	}
+
+	// 逐行处理，避免一次性加载所有行
+	rowCount := 2 // 从第二行开始处理数据
+	for rowCount <= maxProcessRows {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+
+		// 跳过空行
+		isEmptyRow := true
+		for _, cell := range row {
+			if cell != "" {
+				isEmptyRow = false
+				break
+			}
+		}
+		if isEmptyRow {
+			rowCount++
+			continue
+		}
+
+		// 写入markdown表格格式的数据行
+		fullText.WriteString("| ")
+		for _, cell := range row {
+			fullText.WriteString(cell)
+			fullText.WriteString(" | ")
+		}
+		fullText.WriteString("\n")
+
+		rowCount++
+	}
+
+	// 添加文件分隔符
+	fullText.WriteString("\n" + strings.Repeat("-", 80) + "\n\n")
+
 	return fullText.String(), nil
 }
 
 func isSupportedExt(ext string) bool {
 	supported := []string{
-		".txt", ".md", ".pdf", ".docx", ".xlsx",
+		".txt", ".md", ".pdf", ".docx", ".xlsx", ".xls", ".csv",
 	}
 	return slices.Contains(supported, ext)
 }

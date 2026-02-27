@@ -25,5 +25,9 @@ func (l *Llama) ChatStream(messagesJSON string, stopTokens []string, nPredict in
 	return fmt.Errorf("CGO is disabled, Llama binding is unavailable")
 }
 
+func (l *Llama) GetEmbedding(text string) ([]float32, error) {
+	return nil, fmt.Errorf("CGO is disabled, Llama binding is unavailable")
+}
+
 func (l *Llama) Close() {
 }

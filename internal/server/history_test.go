@@ -32,9 +32,9 @@ func TestBuildHistory(t *testing.T) {
 	// 测试截取部分消息
 	history = BuildHistory(dbMessages, 3)
 	expected = []llm.ChatMessage{
-		{Role: "user", Content: "Hello"},
 		{Role: "assistant", Content: "Hi there!"},
 		{Role: "user", Content: "How are you?"},
+		{Role: "assistant", Content: "I'm fine, thank you!"},
 	}
 	assert.Equal(t, expected, history)
 
@@ -58,7 +58,7 @@ func TestBuildHistoryWithKB(t *testing.T) {
 
 	// 注意：由于augmentHistoryWithKB是一个内部函数，我们无法直接测试其具体行为
 	// 我们只能测试它确实返回了一个非空的历史记录数组
-	history := BuildHistoryWithKB(dbMessages, 10, "Go language")
+	history := BuildHistoryWithKB(nil, dbMessages, 10, "Go language")
 
 	// 验证基本结构
 	assert.NotEmpty(t, history)
@@ -76,7 +76,7 @@ func TestBuildRetryHistoryWithKB(t *testing.T) {
 
 	// 注意：由于augmentHistoryWithKB是一个内部函数，我们无法直接测试其具体行为
 	// 我们只能测试它确实返回了一个非空的历史记录数组
-	history := BuildRetryHistoryWithKB(dbMessages, 10)
+	history := BuildRetryHistoryWithKB(nil, dbMessages, 10)
 
 	// 验证基本结构
 	assert.NotEmpty(t, history)
@@ -89,7 +89,7 @@ func TestBuildRetryHistoryWithKB(t *testing.T) {
 		{Role: "assistant", Content: "Hi there!"},
 	}
 
-	history2 := BuildRetryHistoryWithKB(dbMessages2, 10)
+	history2 := BuildRetryHistoryWithKB(nil, dbMessages2, 10)
 
 	// 验证基本结构
 	assert.NotEmpty(t, history2)
@@ -98,6 +98,6 @@ func TestBuildRetryHistoryWithKB(t *testing.T) {
 
 	// 测试空消息列表
 	emptyMessages := []db.Message{}
-	history3 := BuildRetryHistoryWithKB(emptyMessages, 10)
+	history3 := BuildRetryHistoryWithKB(nil, emptyMessages, 10)
 	assert.Empty(t, history3)
 }
