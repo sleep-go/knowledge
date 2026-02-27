@@ -223,7 +223,8 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 		return history
 	}
 	// 优化：精简 Prompt 结构，减少 token 占用
-	prompt := "你是一个本地知识库助手。请仅基于提供的上下文回答问题。\n\n"
+	prompt := "你是一个本地知识库助手。请仅基于提供的上下文回答问题；如果上下文没有答案，直接回答“未找到相关数据”，不要猜测。\n" +
+		"当问题包含编号/ID（例如学号、订单号、CHN...）时，请先在上下文中定位包含该编号的记录，再从记录中提取字段（如“成绩”）原样回答。\n\n"
 
 	// 1. 尝试直接读取附件内容
 	// 匹配前端生成的: [已上传文件: [filename](/api/kb/download?file=...)]
@@ -235,9 +236,9 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 	if len(matches) > 2 && kbase != nil {
 		// 优先使用 Label 中的文件名（通常是原始文件名）
 		filename := strings.TrimSpace(matches[1])
-// 也可以尝试使用 URL 参数中的文件名（URL 编码过的）
+		// 也可以尝试使用 URL 参数中的文件名（URL 编码过的）
 		encodedFilename := matches[2]
-		
+
 		fmt.Printf("[KB] Detected file in message. Label: %s, Encoded URL param: %s\n", filename, encodedFilename)
 
 		// 如果 Label 为空或者看起来不正常，尝试解码 URL 参数
@@ -290,8 +291,21 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 	var chunks []db.KnowledgeBaseChunk
 	var err error
 
+	// 编号/ID 优先策略：如果问题里出现明显的 ID，则优先用该 ID 做文本候选集，避免被其它词干扰
+	idRe := regexp.MustCompile(`(?i)\b[A-Z]{2,}\d{4}-\d{2}-\d+\b`)
+	idMatch := idRe.FindString(lastUserMsg)
+
 	// 首先尝试使用向量搜索（两段式：文本候选集 -> 向量精排）
 	if llm.CurrentEngine != nil {
+		// embedding 一致性检查：若模型已切换，则跳过向量检索，避免“维度/分布不一致”导致检索失真
+		curModel := strings.TrimSpace(llm.CurrentEngine.GetModelPath())
+		kbModel, _ := db.GetKBEmbeddingModel()
+		kbModel = strings.TrimSpace(kbModel)
+		if kbModel != "" && curModel != "" && kbModel != curModel {
+			fmt.Printf("[KB] Embedding model mismatch: kb=%s current=%s; skip vector search\n", kbModel, curModel)
+			goto TextFallback
+		}
+
 		queryEmbedding, e := llm.CurrentEngine.GetEmbedding(lastUserMsg)
 		if e == nil && len(queryEmbedding) > 0 {
 			// 生成候选集：用现有 LIKE 检索缩小范围，避免全表拉取
@@ -299,7 +313,13 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 			if len([]rune(lastUserMsg)) >= 30 {
 				candidateLimit = 800
 			}
-			candidates, e2 := db.SearchKBChunks(lastUserMsg, candidateLimit)
+			queryForCandidates := lastUserMsg
+			if idMatch != "" {
+				// 只用 ID 做候选集（命中率更高）
+				queryForCandidates = idMatch
+				candidateLimit = 2000
+			}
+			candidates, e2 := db.SearchKBChunks(queryForCandidates, candidateLimit)
 			if e2 == nil && len(candidates) > 0 {
 				const topK = 5
 				h := scoredMinHeap{}
@@ -346,9 +366,14 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 		}
 	}
 
+TextFallback:
 	// 如果向量搜索失败或没有结果，回退到传统的文本搜索
 	if len(chunks) == 0 {
-		chunks, err = db.SearchKBChunks(lastUserMsg, 5)
+		queryForText := lastUserMsg
+		if idMatch != "" {
+			queryForText = idMatch
+		}
+		chunks, err = db.SearchKBChunks(queryForText, 5)
 	}
 
 	if err == nil && len(chunks) > 0 {
@@ -426,21 +451,21 @@ func cosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) {
 		return 0
 	}
-	
+
 	var dotProduct float32
 	var normA float32
 	var normB float32
-	
+
 	for i := range a {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
 	}
-	
+
 	if normA == 0 || normB == 0 {
 		return 0
 	}
-	
+
 	return dotProduct / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
 }
 

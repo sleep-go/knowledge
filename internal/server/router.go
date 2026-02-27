@@ -38,7 +38,7 @@ func SetupRouter(staticFS embed.FS, engine llm.Engine, kbase *kb.KnowledgeBase) 
 		api.POST("/conversations/batch-delete", s.BatchDeleteConversations)
 		api.POST("/conversations", s.CreateConversation)
 		api.GET("/conversations/:id/messages", s.GetConversationMessages)
-		
+
 		// /history is an alias for getting default conversation messages
 		api.GET("/history", func(c *gin.Context) {
 			defaultConv, _ := db.GetOrCreateDefaultConversation()
@@ -72,6 +72,7 @@ func SetupRouter(staticFS embed.FS, engine llm.Engine, kbase *kb.KnowledgeBase) 
 		api.GET("/kb/files", s.ListKBFiles)
 		api.GET("/kb/download", s.DownloadKBFile)
 		api.GET("/kb/content", s.GetKBFileContent)
+		api.GET("/kb/debug/search", s.DebugKBSearch)
 		api.DELETE("/kb/files/:id", s.DeleteKBFile)
 		api.POST("/kb/files/batch-delete", s.BatchDeleteKBFiles)
 		api.POST("/kb/sync", s.SyncKB)

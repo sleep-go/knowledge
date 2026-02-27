@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"knowledge/internal/db"
+	"knowledge/internal/llm"
 
 	"github.com/gin-gonic/gin"
 )
@@ -118,11 +120,11 @@ return posixPath`
 
 	// 清理输出：只保留路径，过滤掉日志信息
 	pathStr := string(output)
-	
+
 	// 找到最后一个换行符，然后取后面的内容
 	lines := strings.Split(pathStr, "\n")
 	var cleanPath string
-	
+
 	// 从后向前查找，找到第一个非空且看起来像路径的行
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -131,12 +133,12 @@ return posixPath`
 			break
 		}
 	}
-	
+
 	// 如果没找到，就用原来的方式处理
 	if cleanPath == "" {
 		cleanPath = strings.TrimSpace(pathStr)
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{"path": cleanPath})
 }
 
@@ -161,6 +163,115 @@ func (s *Server) SyncKB(c *gin.Context) {
 		}
 	}()
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "Knowledge base sync started"})
+}
+
+func (s *Server) DebugKBSearch(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	if q == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "q is required"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	currentModel := ""
+	if llm.CurrentEngine != nil {
+		currentModel = llm.CurrentEngine.GetModelPath()
+	}
+	kbModel, _ := db.GetKBEmbeddingModel()
+
+	// 候选集来自文本检索（能确保命中包含编号/关键字的 chunk）
+	candidates, err := db.SearchKBChunks(q, 800)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	queryVec, vecErr := func() ([]float32, error) {
+		if llm.CurrentEngine == nil {
+			return nil, fmt.Errorf("LLM engine not initialized")
+		}
+		if kbModel != "" && currentModel != "" && kbModel != currentModel {
+			return nil, fmt.Errorf("embedding model mismatch (kb=%s, current=%s)", kbModel, currentModel)
+		}
+		return llm.CurrentEngine.GetEmbedding(q)
+	}()
+
+	type item struct {
+		ID         uint    `json:"id"`
+		FileID     uint    `json:"file_id"`
+		Similarity float32 `json:"similarity"`
+		HasVector  bool    `json:"has_vector"`
+		Snippet    string  `json:"snippet"`
+	}
+
+	res := make([]item, 0, limit)
+	if vecErr != nil || len(queryVec) == 0 {
+		// 无向量时仅返回文本命中情况
+		for i := 0; i < len(candidates) && i < limit; i++ {
+			ch := candidates[i]
+			res = append(res, item{
+				ID:         ch.ID,
+				FileID:     ch.FileID,
+				Similarity: 0,
+				HasVector:  len(ch.Vector) > 0,
+				Snippet:    truncateRunes(ch.Content, 120),
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"q":                  q,
+			"current_model":      currentModel,
+			"kb_embedding_model": kbModel,
+			"vector_error":       vecErr.Error(),
+			"candidates":         len(candidates),
+			"results":            res,
+		})
+		return
+	}
+
+	type scored struct {
+		ch  db.KnowledgeBaseChunk
+		sim float32
+	}
+	scoredList := make([]scored, 0, len(candidates))
+	for _, ch := range candidates {
+		if len(ch.Vector) == 0 {
+			continue
+		}
+		v := bytesToFloat32Slice(ch.Vector)
+		if len(v) != len(queryVec) {
+			continue
+		}
+		scoredList = append(scoredList, scored{ch: ch, sim: cosineSimilarity(queryVec, v)})
+	}
+	// 简单排序取前 N（调试端点可接受）
+	sort.Slice(scoredList, func(i, j int) bool { return scoredList[i].sim > scoredList[j].sim })
+
+	for i := 0; i < len(scoredList) && i < limit; i++ {
+		ch := scoredList[i].ch
+		res = append(res, item{
+			ID:         ch.ID,
+			FileID:     ch.FileID,
+			Similarity: scoredList[i].sim,
+			HasVector:  true,
+			Snippet:    truncateRunes(ch.Content, 120),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"q":                  q,
+		"current_model":      currentModel,
+		"kb_embedding_model": kbModel,
+		"vector_dim":         len(queryVec),
+		"candidates":         len(candidates),
+		"scored":             len(scoredList),
+		"results":            res,
+	})
 }
 
 func (s *Server) ResetKB(c *gin.Context) {

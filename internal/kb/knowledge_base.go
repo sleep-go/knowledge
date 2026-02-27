@@ -605,9 +605,26 @@ func getEmbedding(text string) ([]byte, error) {
 }
 
 func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
+	// 确保“写入向量时使用的 embedding 模型”和“后续查询的 embedding 模型”一致
+	if llm.CurrentEngine != nil {
+		currentModel := strings.TrimSpace(llm.CurrentEngine.GetModelPath())
+		if currentModel != "" {
+			existingModel, _ := db.GetKBEmbeddingModel()
+			existingModel = strings.TrimSpace(existingModel)
+			if existingModel == "" {
+				_ = db.SetKBEmbeddingModel(currentModel)
+			} else if existingModel != currentModel {
+				return fmt.Errorf("embedding model changed (kb=%s, current=%s). please reset/rebuild knowledge base", existingModel, currentModel)
+			}
+		}
+	}
+
 	ext := strings.ToLower(filepath.Ext(f.Path))
-	var content string
-	var err error
+	var (
+		content     string
+		indexChunks []string
+		err         error
+	)
 
 	switch ext {
 	case ".pdf":
@@ -615,7 +632,8 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	case ".docx":
 		content, err = extractTextFromDocx(f.Path)
 	case ".xlsx", ".xls":
-		content, err = extractTextFromXlsx(f.Path)
+		// 预览仍使用 markdown 表格；索引/检索使用行级语义编码（更适合按编号/成绩查询）
+		indexChunks, err = extractIndexChunksFromXlsx(f.Path)
 	default:
 		// 默认处理文本文件
 		var b []byte
@@ -637,7 +655,7 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	case ".docx":
 		chunks = splitText(content, 1200, 200)
 	case ".xlsx", ".xls":
-		chunks = splitText(content, 2000, 300) // XLSX 和 XLS 文件使用更大的分片，减少分片数量
+		chunks = indexChunks
 	default:
 		chunks = splitText(content, 1000, 150) // 普通文本适当减小重叠
 	}
@@ -744,6 +762,134 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	}
 
 	return nil
+}
+
+func extractIndexChunksFromXlsx(path string) ([]string, error) {
+	f, err := excelize.OpenFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	fileSize := fileInfo.Size()
+
+	// 最大处理行数：文件大小每增加1MB，增加1000行，最大不超过40000行
+	maxProcessRows := int(fileSize/(1024*1024)) * 1000
+	if maxProcessRows < 1000 {
+		maxProcessRows = 1000
+	}
+	if maxProcessRows > 40000 {
+		maxProcessRows = 40000
+	}
+
+	const targetChunkChars = 1800
+	var chunks []string
+
+	sheets := f.GetSheetList()
+	for _, sheet := range sheets {
+		rows, err := f.Rows(sheet)
+		if err != nil {
+			continue
+		}
+
+		var (
+			headers []string
+			rowNum  = 0
+			sb      strings.Builder
+		)
+
+		flush := func() {
+			s := strings.TrimSpace(sb.String())
+			if s != "" {
+				chunks = append(chunks, s)
+			}
+			sb.Reset()
+		}
+
+		for rows.Next() {
+			rowNum++
+			if rowNum > maxProcessRows {
+				break
+			}
+			cells, err := rows.Columns()
+			if err != nil {
+				continue
+			}
+			if rowNum == 1 {
+				// 表头行
+				headers = make([]string, len(cells))
+				for i := range cells {
+					headers[i] = strings.TrimSpace(cells[i])
+					if headers[i] == "" {
+						headers[i] = fmt.Sprintf("列%d", i+1)
+					}
+				}
+				continue
+			}
+
+			// 跳过空行
+			empty := true
+			for _, c := range cells {
+				if strings.TrimSpace(c) != "" {
+					empty = false
+					break
+				}
+			}
+			if empty {
+				continue
+			}
+
+			// 行级语义编码：工作表 + 行号 + 列名:值
+			var line strings.Builder
+			line.WriteString("工作表: ")
+			line.WriteString(sheet)
+			line.WriteString("；行: ")
+			line.WriteString(strconv.Itoa(rowNum))
+			line.WriteString("；")
+
+			limit := len(cells)
+			if len(headers) < limit {
+				limit = len(headers)
+			}
+			for i := 0; i < limit; i++ {
+				v := strings.TrimSpace(cells[i])
+				if v == "" {
+					continue
+				}
+				line.WriteString(headers[i])
+				line.WriteString(": ")
+				line.WriteString(v)
+				line.WriteString("；")
+			}
+
+			record := strings.TrimSpace(line.String())
+			if record == "" {
+				continue
+			}
+
+			// 控制 chunk 大小，保证记录不被截断
+			if sb.Len() > 0 && sb.Len()+len(record)+1 > targetChunkChars {
+				flush()
+			}
+			if sb.Len() == 0 {
+				sb.WriteString("数据来源: Excel；文件: ")
+				sb.WriteString(filepath.Base(path))
+				sb.WriteString("\n")
+			}
+			sb.WriteString(record)
+			sb.WriteString("\n")
+		}
+
+		flush()
+	}
+
+	return chunks, nil
 }
 
 func extractTextFromPDF(path string) (string, error) {

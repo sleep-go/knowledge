@@ -55,6 +55,7 @@ type KnowledgeBaseChunk struct {
 
 const SystemPromptKey = "system_prompt"
 const KBFolderKey = "kb_folder"
+const KBEmbeddingModelKey = "kb_embedding_model"
 const DefaultSystemPrompt = "你是一个中文的助手，你会根据用户的问题回答用户的问题。"
 
 var DB *gorm.DB
@@ -228,6 +229,18 @@ func GetSystemPrompt() (string, error) {
 
 func GetKBFolder() (string, error) {
 	return GetSetting(KBFolderKey)
+}
+
+func GetKBEmbeddingModel() (string, error) {
+	return GetSetting(KBEmbeddingModelKey)
+}
+
+func SetKBEmbeddingModel(model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	return SetSetting(KBEmbeddingModelKey, model)
 }
 
 func ListKBFiles() ([]KnowledgeBaseFile, error) {
