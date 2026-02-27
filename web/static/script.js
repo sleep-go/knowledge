@@ -83,66 +83,198 @@ document.addEventListener('DOMContentLoaded', () => {
         return s;
     }
 
-    function renderTable(text) {
-        const lines = text.trim().split('\n');
-        if (lines.length < 3) return '';
-        
-        // 检查是否是表格格式
-        // 表格格式：第一行是表头，第二行是分隔线，后续是数据行
-        const headerLine = lines[0].trim();
-        const separatorLine = lines[1].trim();
-        
-        // 表头和分隔线都应该包含 | 字符
-        if (!headerLine.includes('|') || !separatorLine.includes('|')) return '';
-        
-        // 分隔线应该只包含 |、-、: 字符
-        if (!/^[|\-:\s]+$/.test(separatorLine)) return '';
-        
-        // 解析表头
-        const headers = headerLine.split('|').map(h => h.trim()).filter(h => h !== '');
-        if (headers.length === 0) return '';
-        
-        // 解析数据行
-        const rows = [];
-        for (let i = 2; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue; // 跳过空行
-            if (!line.includes('|')) break; // 遇到非表格行就停止
-            const cells = line.split('|').map(c => c.trim()).filter(c => c !== '');
-            if (cells.length > 0) {
-                rows.push(cells);
+    function normalizeMarkdownTableChars(s) {
+        // 兼容中文输入法/模型输出的全角符号
+        return String(s ?? '')
+            .replaceAll('｜', '|')   // fullwidth vertical bar
+            .replaceAll('—', '-')   // em dash
+            .replaceAll('–', '-')   // en dash
+            .replaceAll('－', '-')  // fullwidth hyphen-minus
+            .replaceAll('‑', '-');  // non-breaking hyphen
+    }
+
+    function renderParagraphsAndLists(lines) {
+        if (!lines || lines.length === 0) return '';
+
+        let html = '';
+        let inList = false;
+
+        for (const rawLine of lines) {
+            const line = String(rawLine ?? '').replace(/\r/g, '');
+            const m = /^(\s*[-*])\s+(.*)$/.exec(line);
+
+            if (m) {
+                if (!inList) {
+                    inList = true;
+                    html += '<ul>';
+                }
+                html += `<li>${renderInlineMarkdown(m[2])}</li>`;
+                continue;
             }
+
+            if (inList) {
+                html += '</ul>';
+                inList = false;
+            }
+
+            if (line.trim() === '') {
+                continue;
+            }
+            html += `<p>${renderInlineMarkdown(line)}</p>`;
         }
-        
-        if (rows.length === 0) return '';
-        
-        // 生成HTML表格
-        let html = '<div class="markdown-table-container"><table class="markdown-table">';
-        
-        // 表头
-        html += '<thead><tr>';
-        headers.forEach(header => {
-            html += `<th>${renderInlineMarkdown(header)}</th>`;
-        });
-        html += '</tr></thead>';
-        
-        // 数据行
-        html += '<tbody>';
-        rows.forEach(row => {
-            html += '<tr>';
-            row.forEach(cell => {
-                html += `<td>${renderInlineMarkdown(cell)}</td>`;
-            });
-            html += '</tr>';
-        });
-        html += '</tbody></table></div>';
-        
+
+        if (inList) html += '</ul>';
         return html;
+    }
+
+    function splitMarkdownTableRowFromFirstPipe(rawLine) {
+        const s = normalizeMarkdownTableChars(rawLine);
+        const pipeIndex = s.indexOf('|');
+        if (pipeIndex === -1) return null;
+
+        const row = s.slice(pipeIndex);
+        const parts = row.split('|').map(x => x.trim());
+
+        // 移除边界 '|' 产生的空项，但保留中间的空单元格（如 "a||b"）
+        if (parts.length && parts[0] === '') parts.shift();
+        if (parts.length && parts[parts.length - 1] === '') parts.pop();
+        return parts;
+    }
+
+    function parseAlignmentCell(cell) {
+        const c = normalizeMarkdownTableChars(cell).trim().replace(/\s+/g, '');
+        if (!c) return null;
+        // markdown 标准通常是 3+ 个 '-'，但这里放宽为 1+，以兼容模型输出
+        if (!/^:?-+:?$/.test(c)) return null;
+        const left = c.startsWith(':');
+        const right = c.endsWith(':');
+        if (left && right) return 'center';
+        if (right) return 'right';
+        return 'left';
+    }
+
+    function renderMarkdownTableHtml(headers, alignments, rows) {
+        const colCount = headers.length;
+        let html = '<div class="markdown-table-container"><table class="markdown-table">';
+
+        html += '<thead><tr>';
+        for (let i = 0; i < colCount; i++) {
+            const align = alignments[i] || 'left';
+            html += `<th style="text-align: ${align}">${renderInlineMarkdown(headers[i] ?? '')}</th>`;
+        }
+        html += '</tr></thead>';
+
+        html += '<tbody>';
+        for (const row of rows) {
+            html += '<tr>';
+            for (let i = 0; i < colCount; i++) {
+                const align = alignments[i] || 'left';
+                html += `<td style="text-align: ${align}">${renderInlineMarkdown(row[i] ?? '')}</td>`;
+            }
+            html += '</tr>';
+        }
+        html += '</tbody></table></div>';
+
+        return html;
+    }
+
+    function tryParseTableAt(lines, startIndex) {
+        if (!Array.isArray(lines)) return null;
+        if (startIndex < 0 || startIndex + 1 >= lines.length) return null;
+
+        const headerRaw = normalizeMarkdownTableChars(lines[startIndex]);
+        const separatorRaw = normalizeMarkdownTableChars(lines[startIndex + 1]);
+
+        const headerPipeIndex = headerRaw.indexOf('|');
+        const separatorPipeIndex = separatorRaw.indexOf('|');
+        if (headerPipeIndex === -1 || separatorPipeIndex === -1) return null;
+
+        const prefix = headerRaw.slice(0, headerPipeIndex);
+        const separatorPart = separatorRaw.slice(separatorPipeIndex).trim();
+        if (!/^[|\-:\s]+$/.test(separatorPart)) return null;
+
+        const headers = splitMarkdownTableRowFromFirstPipe(headerRaw);
+        if (!headers || headers.length < 2) return null;
+
+        const separatorCells = splitMarkdownTableRowFromFirstPipe(separatorRaw);
+        if (!separatorCells || separatorCells.length < headers.length) return null;
+
+        const alignments = [];
+        for (let i = 0; i < headers.length; i++) {
+            const a = parseAlignmentCell(separatorCells[i]);
+            if (!a) return null; // 分隔线不合法就不当表格
+            alignments.push(a);
+        }
+
+        const rows = [];
+        let i = startIndex + 2;
+        while (i < lines.length) {
+            const raw = normalizeMarkdownTableChars(lines[i]);
+            if (raw.trim() === '') break;
+            if (!raw.includes('|')) break;
+
+            const cells = splitMarkdownTableRowFromFirstPipe(raw);
+            if (!cells || cells.length === 0) break;
+
+            const normalized = cells.slice(0, headers.length);
+            while (normalized.length < headers.length) normalized.push('');
+            rows.push(normalized);
+            i++;
+        }
+
+        return {
+            prefix: prefix.trimEnd(),
+            headers,
+            alignments,
+            rows,
+            nextIndex: i
+        };
+    }
+
+    function renderTextWithTables(text) {
+        const lines = normalizeMarkdownTableChars(text).split('\n');
+        let html = '';
+        let buffer = [];
+
+        for (let i = 0; i < lines.length; ) {
+            const parsed = tryParseTableAt(lines, i);
+            if (!parsed) {
+                buffer.push(lines[i]);
+                i++;
+                continue;
+            }
+
+            // 表头行前的前缀文字（如“我的对话中返回的 ”）要保留为普通文本
+            if (parsed.prefix && parsed.prefix.trim() !== '') {
+                buffer.push(parsed.prefix);
+            }
+
+            html += renderParagraphsAndLists(buffer);
+            buffer = [];
+
+            html += renderMarkdownTableHtml(parsed.headers, parsed.alignments, parsed.rows);
+            i = parsed.nextIndex;
+        }
+
+        html += renderParagraphsAndLists(buffer);
+        return html;
+    }
+
+    function renderTable(text) {
+        const lines = normalizeMarkdownTableChars(text).trim().split('\n');
+        if (lines.length < 2) return '';
+
+        for (let i = 0; i < lines.length - 1; i++) {
+            const parsed = tryParseTableAt(lines, i);
+            if (!parsed) continue;
+            return renderMarkdownTableHtml(parsed.headers, parsed.alignments, parsed.rows);
+        }
+        return '';
     }
 
     function renderMarkdown(text) {
         if (!text) return '';
-        
+
         // 匹配代码块、think 块、document 块、knowledge_base 块
         // 支持未闭合的标签以实现渐进式渲染
         const regex = /(```[\s\S]*?(?:```|$)|<think>[\s\S]*?(?:<\/think>|$)|<document\s+index="\d+">[\s\S]*?<\/document>|<knowledge_base>[\s\S]*?(?:<\/knowledge_base>|$))/gi;
@@ -211,39 +343,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 html += `<div class="knowledge-base-block"><div class="knowledge-base-title">知识库引用</div><div class="knowledge-base-content">${renderMarkdown(content)}</div></div>`;
                 continue;
             }
-            
-            // 处理表格
-            const tableHtml = renderTable(part);
-            if (tableHtml) {
-                html += tableHtml;
-                continue;
-            }
-            
-            // 普通 Markdown 处理 (列表、段落)
-            const lines = part.split('\n');
-            let inList = false;
-            for (const rawLine of lines) {
-                const line = rawLine.replace(/\r/g, '');
-                const m = /^(\s*[-*])\s+(.*)$/.exec(line);
-                if (m) {
-                    if (!inList) {
-                        inList = true;
-                        html += '<ul>';
-                    }
-                    html += `<li>${renderInlineMarkdown(m[2])}</li>`;
-                } else {
-                    if (inList) {
-                        html += '</ul>';
-                        inList = false;
-                    }
-                    if (line.trim() === '') {
-                        // 空行忽略
-                    } else {
-                        html += `<p>${renderInlineMarkdown(line)}</p>`;
-                    }
-                }
-            }
-            if (inList) html += '</ul>';
+
+            // 普通文本 + 表格混排渲染
+            html += renderTextWithTables(part);
         }
         return html;
     }
