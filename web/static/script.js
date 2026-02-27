@@ -83,6 +83,63 @@ document.addEventListener('DOMContentLoaded', () => {
         return s;
     }
 
+    function renderTable(text) {
+        const lines = text.trim().split('\n');
+        if (lines.length < 3) return '';
+        
+        // 检查是否是表格格式
+        // 表格格式：第一行是表头，第二行是分隔线，后续是数据行
+        const headerLine = lines[0].trim();
+        const separatorLine = lines[1].trim();
+        
+        // 表头和分隔线都应该包含 | 字符
+        if (!headerLine.includes('|') || !separatorLine.includes('|')) return '';
+        
+        // 分隔线应该只包含 |、-、: 字符
+        if (!/^[|\-:\s]+$/.test(separatorLine)) return '';
+        
+        // 解析表头
+        const headers = headerLine.split('|').map(h => h.trim()).filter(h => h !== '');
+        if (headers.length === 0) return '';
+        
+        // 解析数据行
+        const rows = [];
+        for (let i = 2; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue; // 跳过空行
+            if (!line.includes('|')) break; // 遇到非表格行就停止
+            const cells = line.split('|').map(c => c.trim()).filter(c => c !== '');
+            if (cells.length > 0) {
+                rows.push(cells);
+            }
+        }
+        
+        if (rows.length === 0) return '';
+        
+        // 生成HTML表格
+        let html = '<div class="markdown-table-container"><table class="markdown-table">';
+        
+        // 表头
+        html += '<thead><tr>';
+        headers.forEach(header => {
+            html += `<th>${renderInlineMarkdown(header)}</th>`;
+        });
+        html += '</tr></thead>';
+        
+        // 数据行
+        html += '<tbody>';
+        rows.forEach(row => {
+            html += '<tr>';
+            row.forEach(cell => {
+                html += `<td>${renderInlineMarkdown(cell)}</td>`;
+            });
+            html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+        
+        return html;
+    }
+
     function renderMarkdown(text) {
         if (!text) return '';
         
@@ -152,6 +209,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (/^<knowledge_base>/i.test(part)) {
                 const content = part.replace(/^<knowledge_base>/i, '').replace(/<\/knowledge_base>$/i, '');
                 html += `<div class="knowledge-base-block"><div class="knowledge-base-title">知识库引用</div><div class="knowledge-base-content">${renderMarkdown(content)}</div></div>`;
+                continue;
+            }
+            
+            // 处理表格
+            const tableHtml = renderTable(part);
+            if (tableHtml) {
+                html += tableHtml;
                 continue;
             }
             
