@@ -15,6 +15,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const kbFolderInput = document.getElementById('kb-folder-input');
     const syncKBBtn = document.getElementById('sync-kb-btn');
     const resetKBBtn = document.getElementById('reset-kb-btn');
+    const pauseSyncKBBtn = document.getElementById('pause-sync-kb-btn');
+    const stopSyncKBBtn = document.getElementById('stop-sync-kb-btn');
     const syncStatus = document.getElementById('sync-status');
     const syncProgressContainer = document.getElementById('sync-progress-container');
     const syncProgressBar = document.getElementById('sync-progress-bar');
@@ -53,6 +55,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let isManagementMode = false;
     let selectedConversationIds = new Set();
     let selectedFileIds = new Set();
+
+    // KB Sync timers & state
+    let syncProgressTimer = null;
+    let syncFileListTimer = null;
+    let isSyncRunning = false;
 
     function escapeHtml(str) {
         return String(str)
@@ -1210,6 +1217,8 @@ document.addEventListener('DOMContentLoaded', () => {
         syncStatus.textContent = '正在同步...';
         syncKBBtn.disabled = true;
         resetKBBtn.disabled = true;
+        pauseSyncKBBtn.disabled = false;
+        stopSyncKBBtn.disabled = false;
         syncProgressContainer.style.display = 'block';
         
         try {
@@ -1218,17 +1227,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 syncStatus.textContent = '同步已开始';
                 
                 // 定期获取同步进度
-                const progressTimer = setInterval(async () => {
+                if (syncProgressTimer) clearInterval(syncProgressTimer);
+                syncProgressTimer = setInterval(async () => {
                     const progress = await getSyncProgress();
                     updateProgressBar(progress);
                 }, 1000);
                 
                 // 每隔几秒刷新一下文件列表
-                const fileListTimer = setInterval(async () => {
+                if (syncFileListTimer) clearInterval(syncFileListTimer);
+                isSyncRunning = true;
+                syncFileListTimer = setInterval(async () => {
                     const finished = await loadKBFiles();
                     if (finished) {
-                        clearInterval(fileListTimer);
-                        clearInterval(progressTimer);
+                        clearInterval(syncFileListTimer);
+                        clearInterval(syncProgressTimer);
+                        syncFileListTimer = null;
+                        syncProgressTimer = null;
+                        isSyncRunning = false;
                         
                         // 最后一次更新进度
                         const finalProgress = await getSyncProgress();
@@ -1237,6 +1252,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         syncStatus.textContent = '同步完成';
                         syncKBBtn.disabled = false;
                         resetKBBtn.disabled = false;
+                        pauseSyncKBBtn.disabled = true;
+                        stopSyncKBBtn.disabled = true;
                         
                         // 延迟隐藏进度条
                         setTimeout(() => {
@@ -1248,6 +1265,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 syncStatus.textContent = '同步失败';
                 syncKBBtn.disabled = false;
                 resetKBBtn.disabled = false;
+                pauseSyncKBBtn.disabled = true;
+                stopSyncKBBtn.disabled = true;
                 syncProgressContainer.style.display = 'none';
             }
         } catch (err) {
@@ -1255,7 +1274,53 @@ document.addEventListener('DOMContentLoaded', () => {
             syncStatus.textContent = '同步出错';
             syncKBBtn.disabled = false;
             resetKBBtn.disabled = false;
+            pauseSyncKBBtn.disabled = true;
+            stopSyncKBBtn.disabled = true;
             syncProgressContainer.style.display = 'none';
+        }
+    });
+
+    // 暂停/恢复同步
+    let isSyncPaused = false;
+    pauseSyncKBBtn.addEventListener('click', async () => {
+        if (!isSyncRunning) return;
+        try {
+            if (!isSyncPaused) {
+                await fetch('/api/kb/sync/pause', { method: 'POST' });
+                isSyncPaused = true;
+                pauseSyncKBBtn.textContent = '恢复';
+                syncStatus.textContent = '已暂停';
+            } else {
+                await fetch('/api/kb/sync/resume', { method: 'POST' });
+                isSyncPaused = false;
+                pauseSyncKBBtn.textContent = '暂停';
+                syncStatus.textContent = '正在处理文件...';
+            }
+        } catch (err) {
+            console.error('Failed to toggle pause:', err);
+        }
+    });
+
+    // 停止同步
+    stopSyncKBBtn.addEventListener('click', async () => {
+        if (!isSyncRunning) return;
+        try {
+            await fetch('/api/kb/sync/stop', { method: 'POST' });
+        } catch (err) {
+            console.error('Failed to stop sync:', err);
+        } finally {
+            if (syncProgressTimer) clearInterval(syncProgressTimer);
+            if (syncFileListTimer) clearInterval(syncFileListTimer);
+            syncProgressTimer = null;
+            syncFileListTimer = null;
+            isSyncRunning = false;
+            isSyncPaused = false;
+            pauseSyncKBBtn.textContent = '暂停';
+            syncStatus.textContent = '已停止';
+            syncKBBtn.disabled = false;
+            resetKBBtn.disabled = false;
+            pauseSyncKBBtn.disabled = true;
+            stopSyncKBBtn.disabled = true;
         }
     });
 

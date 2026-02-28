@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -135,6 +136,8 @@ type KnowledgeBase struct {
 	syncMu     sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
+
+	paused atomic.Bool
 }
 
 func NewKnowledgeBase() *KnowledgeBase {
@@ -173,6 +176,67 @@ func (kb *KnowledgeBase) ResetSyncProgress() {
 		Status:         "idle",
 		Progress:       0,
 		ChunkProgress:  []ChunkProgress{},
+	}
+}
+
+// PauseSync 暂停当前同步/处理
+func (kb *KnowledgeBase) PauseSync() {
+	kb.paused.Store(true)
+}
+
+// ResumeSync 恢复当前同步/处理
+func (kb *KnowledgeBase) ResumeSync() {
+	kb.paused.Store(false)
+}
+
+// CancelSync 停止当前同步/处理，并重置上下文和进度
+func (kb *KnowledgeBase) CancelSync() {
+	kb.syncMu.Lock()
+	defer kb.syncMu.Unlock()
+
+	if kb.cancel != nil {
+		kb.cancel()
+	}
+
+	// 为后续新的同步流程创建新的上下文
+	kb.ctx, kb.cancel = context.WithCancel(context.Background())
+	kb.isSyncing = false
+	kb.ResetSyncProgress()
+	kb.paused.Store(false)
+}
+
+// waitIfPaused 在分片/扫描循环中调用，支持暂停与停止
+func (kb *KnowledgeBase) waitIfPaused() error {
+	for {
+		if kb.ctx != nil {
+			select {
+			case <-kb.ctx.Done():
+				return kb.ctx.Err()
+			default:
+			}
+		}
+		if !kb.paused.Load() {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// updateChunkProgress 更新（或追加）某个文件的分片进度，用于前端展示列表
+func (kb *KnowledgeBase) updateChunkProgress(p ChunkProgress) {
+	kb.progressMu.Lock()
+	defer kb.progressMu.Unlock()
+
+	found := false
+	for i := range kb.progress.ChunkProgress {
+		if kb.progress.ChunkProgress[i].FileName == p.FileName {
+			kb.progress.ChunkProgress[i] = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		kb.progress.ChunkProgress = append(kb.progress.ChunkProgress, p)
 	}
 }
 
@@ -274,6 +338,9 @@ func (kb *KnowledgeBase) ScanFolder() error {
 				return kb.ctx.Err()
 			default:
 			}
+		}
+		if err := kb.waitIfPaused(); err != nil {
+			return err
 		}
 		if err != nil {
 			return err
@@ -426,14 +493,25 @@ func (kb *KnowledgeBase) ProcessFiles() error {
 	progressChan := make(chan struct{}, len(pendingFiles))
 	progressDone := make(chan struct{})
 
-	// 控制并发数量
-	concurrencyLimit := 5
+	// 控制并发数量：根据 CPU 核心数自适应，避免在多核机器上过于保守
+	concurrencyLimit := runtime.NumCPU() * 2
+	if concurrencyLimit < 4 {
+		concurrencyLimit = 4
+	}
+	if concurrencyLimit > 16 {
+		concurrencyLimit = 16
+	}
 	semaphore := make(chan struct{}, concurrencyLimit)
 
 	for _, f := range pendingFiles {
 		wg.Add(1)
 		go func(file db.KnowledgeBaseFile) {
 			defer wg.Done()
+
+			if err := kb.waitIfPaused(); err != nil {
+				errChan <- err
+				return
+			}
 
 			if kb.ctx != nil {
 				select {
@@ -695,15 +773,12 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	}
 
 	// 更新同步进度，添加分片进度信息
-	kb.progressMu.Lock()
-	chunkProgress := ChunkProgress{
+	kb.updateChunkProgress(ChunkProgress{
 		FileName:        fileName,
 		TotalChunks:     totalChunks,
 		ProcessedChunks: 0,
 		Progress:        0,
-	}
-	kb.progress.ChunkProgress = []ChunkProgress{chunkProgress}
-	kb.progressMu.Unlock()
+	})
 
 	// 单事务 + 批量写入：减少 SQLite 写锁争用，并避免中途失败导致数据不一致
 	tx := db.DB.Begin()
@@ -729,6 +804,10 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	batch := make([]db.KnowledgeBaseChunk, 0, batchSize)
 
 	for _, chunkContent := range validChunks {
+		if err := kb.waitIfPaused(); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 		if kb.ctx != nil {
 			select {
 			case <-kb.ctx.Done():
@@ -758,14 +837,12 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		// 进度更新节流：大文件分片时避免每个 chunk 都加锁刷新
 		if processedChunks == totalChunks || processedChunks%25 == 0 || time.Since(lastProgressUpdate) >= 250*time.Millisecond {
 			progress := float64(processedChunks) / float64(totalChunks) * 100
-			kb.progressMu.Lock()
-			kb.progress.ChunkProgress = []ChunkProgress{{
+			kb.updateChunkProgress(ChunkProgress{
 				FileName:        fileName,
 				TotalChunks:     totalChunks,
 				ProcessedChunks: processedChunks,
 				Progress:        progress,
-			}}
-			kb.progressMu.Unlock()
+			})
 			lastProgressUpdate = time.Now()
 		}
 
@@ -807,13 +884,13 @@ func extractIndexChunksFromXlsx(path string) ([]string, error) {
 	}
 	fileSize := fileInfo.Size()
 
-	// 最大处理行数：文件大小每增加1MB，增加1000行，最大不超过40000行
+	// 最大处理行数：文件大小每增加1MB，增加1000行，最大不超过200000行
 	maxProcessRows := int(fileSize/(1024*1024)) * 1000
 	if maxProcessRows < 1000 {
 		maxProcessRows = 1000
 	}
-	if maxProcessRows > 40000 {
-		maxProcessRows = 40000
+	if maxProcessRows > 200000 {
+		maxProcessRows = 200000
 	}
 
 	// chunk 越小需要算的 embedding 越多，会显著拖慢大文件导入。
@@ -1001,13 +1078,13 @@ func extractTextFromXlsx(path string) (string, error) {
 		}
 		fileSize := fileInfo.Size()
 
-		// 计算最大处理行数：文件大小每增加1MB，增加1000行，最大不超过40000行
+		// 计算最大处理行数：文件大小每增加1MB，增加1000行，最大不超过200000行
 		maxProcessRows := int(fileSize/(1024*1024)) * 1000
 		if maxProcessRows < 1000 {
 			maxProcessRows = 1000
 		}
-		if maxProcessRows > 40000 {
-			maxProcessRows = 40000
+		if maxProcessRows > 200000 {
+			maxProcessRows = 200000
 		}
 
 		// 如果工作表行数小于最大处理行数，则处理所有行
@@ -1098,13 +1175,13 @@ func extractTextFromCsv(path string) (string, error) {
 	}
 	fileSize := fileInfo.Size()
 
-	// 计算最大处理行数：文件大小每增加1MB，增加1000行，最大不超过40000行
+	// 计算最大处理行数：文件大小每增加1MB，增加1000行，最大不超过200000行
 	maxProcessRows := int(fileSize/(1024*1024)) * 1000
 	if maxProcessRows < 1000 {
 		maxProcessRows = 1000
 	}
-	if maxProcessRows > 40000 {
-		maxProcessRows = 40000
+	if maxProcessRows > 200000 {
+		maxProcessRows = 200000
 	}
 
 	// 添加文件名称

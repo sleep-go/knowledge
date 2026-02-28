@@ -413,6 +413,30 @@ func (s *Server) ResetKB(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "Knowledge base reset successfully"})
 }
 
+// PauseKBSync 暂停知识库同步/处理
+func (s *Server) PauseKBSync(c *gin.Context) {
+	if s.kbase != nil {
+		s.kbase.PauseSync()
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ResumeKBSync 恢复知识库同步/处理
+func (s *Server) ResumeKBSync(c *gin.Context) {
+	if s.kbase != nil {
+		s.kbase.ResumeSync()
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// StopKBSync 停止当前知识库同步/处理
+func (s *Server) StopKBSync(c *gin.Context) {
+	if s.kbase != nil {
+		s.kbase.CancelSync()
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (s *Server) UploadKBFile(c *gin.Context) {
 	// 1. Get file from request
 	file, err := c.FormFile("file")
