@@ -676,6 +676,23 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 	fileName := filepath.Base(f.Path)
 	totalChunks := len(validChunks)
 	processedChunks := 0
+	lastProgressUpdate := time.Now()
+	fileInfo, _ := os.Stat(f.Path)
+	fileSize := int64(0)
+	if fileInfo != nil {
+		fileSize = fileInfo.Size()
+	}
+
+	// 大文件导入加速：对超大 Excel 可跳过向量生成（仍保存文本，依赖编号/关键词检索；必要时查询阶段再按需生成向量）
+	skipEmbedding := false
+	if ext == ".xlsx" || ext == ".xls" {
+		// Excel 的“按编号/字段检索”主要依赖文本命中；大量向量生成会极慢。
+		// 因此对“中等规模以上”的 Excel 就跳过 embedding，以显著提升导入速度。
+		// （查询阶段仍可对少量候选按需生成向量做精排）
+		if totalChunks >= 200 || fileSize >= 3*1024*1024 || totalChunks >= 1200 || fileSize >= 15*1024*1024 {
+			skipEmbedding = true
+		}
+	}
 
 	// 更新同步进度，添加分片进度信息
 	kb.progressMu.Lock()
@@ -705,7 +722,10 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		return err
 	}
 
-	const batchSize = 200
+	batchSize := 200
+	if totalChunks >= 2000 {
+		batchSize = 500
+	}
 	batch := make([]db.KnowledgeBaseChunk, 0, batchSize)
 
 	for _, chunkContent := range validChunks {
@@ -718,10 +738,14 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 			}
 		}
 		// 生成向量（失败则降级为空向量，仍保留 content 供文本检索）
-		vector, err := getEmbedding(chunkContent)
-		if err != nil {
-			fmt.Printf("Error getting embedding: %v\n", err)
-			vector = nil
+		var vector []byte
+		if !skipEmbedding {
+			v, err := getEmbedding(chunkContent)
+			if err != nil {
+				fmt.Printf("Error getting embedding: %v\n", err)
+				v = nil
+			}
+			vector = v
 		}
 
 		batch = append(batch, db.KnowledgeBaseChunk{
@@ -731,15 +755,19 @@ func (kb *KnowledgeBase) processFile(f db.KnowledgeBaseFile) error {
 		})
 
 		processedChunks++
-		progress := float64(processedChunks) / float64(totalChunks) * 100
-		kb.progressMu.Lock()
-		kb.progress.ChunkProgress = []ChunkProgress{{
-			FileName:        fileName,
-			TotalChunks:     totalChunks,
-			ProcessedChunks: processedChunks,
-			Progress:        progress,
-		}}
-		kb.progressMu.Unlock()
+		// 进度更新节流：大文件分片时避免每个 chunk 都加锁刷新
+		if processedChunks == totalChunks || processedChunks%25 == 0 || time.Since(lastProgressUpdate) >= 250*time.Millisecond {
+			progress := float64(processedChunks) / float64(totalChunks) * 100
+			kb.progressMu.Lock()
+			kb.progress.ChunkProgress = []ChunkProgress{{
+				FileName:        fileName,
+				TotalChunks:     totalChunks,
+				ProcessedChunks: processedChunks,
+				Progress:        progress,
+			}}
+			kb.progressMu.Unlock()
+			lastProgressUpdate = time.Now()
+		}
 
 		if len(batch) >= batchSize {
 			if err := tx.CreateInBatches(batch, batchSize).Error; err != nil {
@@ -788,7 +816,14 @@ func extractIndexChunksFromXlsx(path string) ([]string, error) {
 		maxProcessRows = 40000
 	}
 
-	const targetChunkChars = 1800
+	// chunk 越小需要算的 embedding 越多，会显著拖慢大文件导入。
+	// 对大文件提高 chunk 字符数上限，减少 embedding 次数，但仍保证“按行/按记录”可检索。
+	targetChunkChars := 5000
+	if maxProcessRows >= 20000 || fileSize >= 20*1024*1024 {
+		targetChunkChars = 12000
+	} else if maxProcessRows >= 10000 || fileSize >= 10*1024*1024 {
+		targetChunkChars = 8000
+	}
 	var chunks []string
 
 	sheets := f.GetSheetList()
@@ -803,6 +838,7 @@ func extractIndexChunksFromXlsx(path string) ([]string, error) {
 			rowNum  = 0
 			sb      strings.Builder
 		)
+		var line strings.Builder
 
 		flush := func() {
 			s := strings.TrimSpace(sb.String())
@@ -846,7 +882,7 @@ func extractIndexChunksFromXlsx(path string) ([]string, error) {
 			}
 
 			// 行级语义编码：工作表 + 行号 + 列名:值
-			var line strings.Builder
+			line.Reset()
 			line.WriteString("工作表: ")
 			line.WriteString(sheet)
 			line.WriteString("；行: ")

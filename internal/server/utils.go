@@ -325,8 +325,11 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 				h := scoredMinHeap{}
 				heap.Init(&h)
 
+				// 大文件可能在导入阶段跳过了向量：为避免一次请求对大量候选逐个做 embedding，
+				// 这里设置一个预算，只对少量“无向量候选”按需生成临时 embedding 参与精排。
+				onDemandBudget := 60
 				for _, chunk := range candidates {
-					if len(chunk.Vector) == 0 || chunk.ID == 0 {
+					if chunk.ID == 0 {
 						continue
 					}
 
@@ -334,8 +337,21 @@ func augmentHistoryWithKB(kbase *kb.KnowledgeBase, history []llm.ChatMessage, la
 					if v, ok := kbVecCache.Get(chunk.ID); ok {
 						chunkEmbedding = v
 					} else {
-						chunkEmbedding = bytesToFloat32Slice(chunk.Vector)
-						kbVecCache.Set(chunk.ID, chunkEmbedding)
+						if len(chunk.Vector) > 0 {
+							chunkEmbedding = bytesToFloat32Slice(chunk.Vector)
+							kbVecCache.Set(chunk.ID, chunkEmbedding)
+						} else if idMatch == "" && onDemandBudget > 0 {
+							// 非编号类问题：允许对少量无向量候选按需生成临时向量
+							content := truncateRunes(chunk.Content, 2000)
+							if content != "" && llm.CurrentEngine != nil {
+								emb, e3 := llm.CurrentEngine.GetEmbedding(content)
+								if e3 == nil && len(emb) > 0 {
+									chunkEmbedding = emb
+									kbVecCache.Set(chunk.ID, chunkEmbedding)
+									onDemandBudget--
+								}
+							}
+						}
 					}
 
 					if len(chunkEmbedding) != len(queryEmbedding) {

@@ -1357,6 +1357,12 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // 2.5 Excel：用表格形式预览完整数据（后端流式输出 HTML）
+        if (ext === 'xlsx' || ext === 'xls') {
+            previewBody.innerHTML = `<iframe src="/api/kb/excel/preview?file=${encodeURIComponent(fileName)}" style="width:100%; height:100%; min-height:500px; border:none; border-radius: 10px; background: transparent;"></iframe>`;
+            return;
+        }
+
         // 3. 其他类型（Office、文本、代码），尝试获取解析后的文本内容
         try {
             const res = await fetch(`/api/kb/content?file=${encodeURIComponent(fileName)}`);

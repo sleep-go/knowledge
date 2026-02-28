@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"knowledge/internal/llm"
 
 	"github.com/gin-gonic/gin"
+	"github.com/xuri/excelize/v2"
 )
 
 type UpdateSettingRequest struct {
@@ -103,6 +105,135 @@ func (s *Server) GetKBFileContent(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"content": content,
 	})
+}
+
+// PreviewKBExcel 以 HTML 表格预览 Excel（完整数据，流式输出）
+func (s *Server) PreviewKBExcel(c *gin.Context) {
+	fileName := c.Query("file")
+	if fileName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File parameter is required"})
+		return
+	}
+
+	folder, err := db.GetKBFolder()
+	if err != nil || folder == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Knowledge base folder not set"})
+		return
+	}
+
+	cleanFileName := filepath.Base(fileName)
+	filePath := filepath.Join(folder, cleanFileName)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(cleanFileName))
+	if ext != ".xlsx" && ext != ".xls" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "not an excel file"})
+		return
+	}
+
+	f, err := excelize.OpenFile(filePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open excel: " + err.Error()})
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+
+	// 简单样式：粘性表头 + 可滚动
+	_, _ = c.Writer.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"/>")
+	_, _ = c.Writer.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>")
+	_, _ = c.Writer.WriteString("<title>" + html.EscapeString(cleanFileName) + "</title>")
+	_, _ = c.Writer.WriteString(`<style>
+	:root{color-scheme:dark;}
+	body{margin:0;background:#0b1220;color:#e5e7eb;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;}
+	.top{position:sticky;top:0;z-index:10;background:rgba(11,18,32,.92);backdrop-filter:saturate(180%) blur(10px);border-bottom:1px solid rgba(255,255,255,.08);padding:10px 12px;}
+	.fn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+	.hint{opacity:.7;font-size:12px;margin-top:2px;}
+	.sheet{padding:10px 12px 0 12px;}
+	.sheet h2{margin:10px 0 8px 0;font-size:14px;opacity:.9}
+	.table-wrap{border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:auto;max-height:calc(100vh - 120px);background:rgba(255,255,255,.02);}
+	table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;}
+	thead th{position:sticky;top:0;background:rgba(17,24,39,.98);z-index:5}
+	th,td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);border-right:1px solid rgba(255,255,255,.06);font-size:12px;white-space:nowrap;vertical-align:top;}
+	tr:nth-child(even) td{background:rgba(255,255,255,.01);}
+	th:last-child,td:last-child{border-right:none;}
+	.empty{opacity:.7;padding:12px;}
+	</style></head><body>`)
+	_, _ = c.Writer.WriteString("<div class=\"top\"><div class=\"fn\">" + html.EscapeString(cleanFileName) + "</div><div class=\"hint\">Excel 预览（完整数据）</div></div>")
+
+	sheets := f.GetSheetList()
+	if len(sheets) == 0 {
+		_, _ = c.Writer.WriteString("<div class=\"sheet\"><div class=\"empty\">无工作表</div></div></body></html>")
+		return
+	}
+
+	for _, sheet := range sheets {
+		rows, err := f.Rows(sheet)
+		if err != nil {
+			continue
+		}
+
+		_, _ = c.Writer.WriteString("<div class=\"sheet\"><h2>" + html.EscapeString(sheet) + "</h2>")
+		_, _ = c.Writer.WriteString("<div class=\"table-wrap\"><table>")
+
+		rowNum := 0
+		var header []string
+		for rows.Next() {
+			rowNum++
+			cells, err := rows.Columns()
+			if err != nil {
+				continue
+			}
+
+			// 第一行作为表头（若为空则自动补列名）
+			if rowNum == 1 {
+				header = make([]string, len(cells))
+				for i := range cells {
+					h := strings.TrimSpace(cells[i])
+					if h == "" {
+						h = fmt.Sprintf("列%d", i+1)
+					}
+					header[i] = h
+				}
+				_, _ = c.Writer.WriteString("<thead><tr>")
+				for _, h := range header {
+					_, _ = c.Writer.WriteString("<th>" + html.EscapeString(h) + "</th>")
+				}
+				_, _ = c.Writer.WriteString("</tr></thead><tbody>")
+				continue
+			}
+
+			_, _ = c.Writer.WriteString("<tr>")
+			limit := len(cells)
+			if len(header) > 0 && limit < len(header) {
+				// 末尾补空，保证列对齐
+				for len(cells) < len(header) {
+					cells = append(cells, "")
+				}
+				limit = len(header)
+			} else if len(header) > 0 && limit > len(header) {
+				limit = len(header)
+			}
+			for i := 0; i < limit; i++ {
+				_, _ = c.Writer.WriteString("<td>" + html.EscapeString(cells[i]) + "</td>")
+			}
+			_, _ = c.Writer.WriteString("</tr>")
+		}
+		_ = rows.Close()
+
+		if rowNum <= 1 {
+			_, _ = c.Writer.WriteString("<tbody><tr><td class=\"empty\">无数据</td></tr></tbody>")
+		} else {
+			_, _ = c.Writer.WriteString("</tbody>")
+		}
+		_, _ = c.Writer.WriteString("</table></div></div>")
+	}
+
+	_, _ = c.Writer.WriteString("</body></html>")
 }
 
 func (s *Server) SelectKBFolder(c *gin.Context) {
